@@ -1,0 +1,15 @@
+#!/usr/bin/env python3
+"""Screenshot Tool launcher.
+
+Thin shim that adds the package to sys.path and calls the main entry point.
+This allows running the tool directly without installation.
+"""
+import os
+import sys
+
+# Add src directory to path
+sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+
+from screenshot_tool.cli import main
+
+sys.exit(main())
