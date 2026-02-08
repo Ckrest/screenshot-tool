@@ -75,6 +75,7 @@ class ScreenshotOverlay(Gtk.Window):
 
         # Capture the current screen BEFORE showing window
         self._temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
+        self._temp_file.close()
         try:
             temp_path = capture_fullscreen(config=self.config)
             # Move to our temp file location
@@ -304,7 +305,7 @@ class ScreenshotOverlay(Gtk.Window):
                 return
 
             temp_path = capture_window(app_id, config=self.config)
-            save(temp_path, OutputOptions())
+            save(temp_path, OutputOptions(), self.config)
             temp_path.unlink(missing_ok=True)
         except Exception as e:
             log.error("Error capturing window: %s", e)
@@ -315,7 +316,7 @@ class ScreenshotOverlay(Gtk.Window):
         """Capture a region of the frozen screenshot."""
         try:
             cropped = self.screenshot.new_subpixbuf(x, y, w, h)
-            save_pixbuf(cropped, OutputOptions())
+            save_pixbuf(cropped, OutputOptions(), self.config)
         except Exception as e:
             log.error("Error saving screenshot: %s", e)
         finally:

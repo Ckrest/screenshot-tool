@@ -18,10 +18,10 @@ from typing import Optional
 
 import gi
 gi.require_version("GdkPixbuf", "2.0")
-gi.require_version("Notify", "0.7")
-from gi.repository import GdkPixbuf, Notify
+from gi.repository import GdkPixbuf
 
 from .config import Config, get_config
+from .emit import emit
 from .hooks import notify_save
 
 log = logging.getLogger(__name__)
@@ -99,6 +99,8 @@ def _play_sound():
 def _show_notification(path: Path, width: int, height: int):
     """Show desktop notification."""
     try:
+        gi.require_version("Notify", "0.7")
+        from gi.repository import Notify
         Notify.init("Screenshot Tool")
         notification = Notify.Notification.new(
             "Screenshot Captured",
@@ -180,6 +182,15 @@ def save(
         height=height,
         timestamp=datetime.now().isoformat(),
     )
+
+    # Emit artifact.created event
+    emit("artifact.created", {
+        "output_path": str(output_path),
+        "width": width,
+        "height": height,
+        "format": options.output_format,
+        "timestamp": result.timestamp,
+    })
 
     # Notify hooks (runs asynchronously, won't block)
     notify_save(result, config)

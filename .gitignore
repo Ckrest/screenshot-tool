@@ -1,5 +1,5 @@
 # ──────────────────────────────────────────────────────────────
-# Systems integration (managed by Systems repo, not package repo)
+# Packaging artifacts
 # ──────────────────────────────────────────────────────────────
 pkg/
 
@@ -76,7 +76,7 @@ hooks.local/
 *.pt
 
 # ──────────────────────────────────────────────────────────────
-# Systems-only (not published)
+# Registry metadata (not published)
 # ──────────────────────────────────────────────────────────────
 manifest.yaml
 trait_*.yaml

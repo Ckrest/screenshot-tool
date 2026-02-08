@@ -14,13 +14,27 @@ A feature-rich screenshot utility for Wayland/Wayfire with interactive selection
 
 ## Installation
 
+### System Dependencies
+
+These must be installed via your system package manager:
+
+```bash
+# Arch / Manjaro
+sudo pacman -S gtk3 gtk-layer-shell libnotify gobject-introspection cairo
+
+# Debian / Ubuntu
+sudo apt install gir1.2-gtk-3.0 gir1.2-gtklayershell-0.1 libnotify-dev libgirepository1.0-dev libcairo2-dev
+```
+
+### Python Package
+
 ```bash
 # Clone the repository
 git clone https://github.com/Ckrest/screenshot-tool.git
 cd screenshot-tool
 
-# Install Python dependencies
-pip install PyGObject pycairo PyYAML
+# Install (includes all Python dependencies)
+pip install .
 
 # Ensure wayland-capture is available (or set SCREENSHOT_TOOL_WAYLAND_CAPTURE)
 ```
@@ -29,19 +43,19 @@ pip install PyGObject pycairo PyYAML
 
 ```bash
 # Interactive mode (default)
-./screenshot
+screenshot
 
 # Instant full screen capture
-./screenshot --instant
+screenshot --instant
 
 # Capture specific region
-./screenshot --region 100,100,800,600
+screenshot --region 100,100,800,600
 
 # Capture window by app-id
-./screenshot --window kitty
+screenshot --window kitty
 
 # Silent mode with JSON output (for scripting)
-./screenshot --instant --silent --json
+screenshot --instant --silent --json
 ```
 
 ### Hotkey Setup (Wayfire)
@@ -50,7 +64,7 @@ pip install PyGObject pycairo PyYAML
 # ~/.config/wayfire.ini
 [command]
 binding_screenshot = KEY_SYSRQ
-command_screenshot = /path/to/screenshot-tool/screenshot
+command_screenshot = screenshot
 ```
 
 **Double-tap** the hotkey for instant fullscreen capture.
@@ -80,11 +94,23 @@ Settings via environment variables or `~/.config/screenshot-tool/config.yaml`:
 
 ## Dependencies
 
+### System
+
 - **wayland-capture**: Screen/window capture binary (ext-image-copy-capture protocol)
 - **wl-copy**: Clipboard integration
-- **PyGObject**: GTK3 bindings
 - **gtk-layer-shell**: Wayland overlay support
 - **libnotify**: Desktop notifications
+
+### Python (installed via pip)
+
+- **PyGObject**: GTK3 bindings
+- **pycairo**: Cairo bindings
+- **PyYAML**: Configuration loading
+- **platformdirs**: XDG directory resolution
+
+### Optional
+
+- **wayfire** (pip): Window geometry support for Wayfire compositor
 
 ## Output
 

@@ -8,7 +8,7 @@ Configuration priority (highest to lowest):
 """
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Optional, Any
 
@@ -205,6 +205,10 @@ def load_config(
     for key in PATH_KEYS:
         if key in config_dict and config_dict[key] is not None:
             config_dict[key] = _expand_path(config_dict[key])
+
+    # Filter out unknown keys to prevent TypeError on Config()
+    valid_keys = {f.name for f in fields(Config)}
+    config_dict = {k: v for k, v in config_dict.items() if k in valid_keys}
 
     return Config(**config_dict)
 

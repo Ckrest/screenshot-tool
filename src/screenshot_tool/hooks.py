@@ -1,12 +1,12 @@
 """Hook system for post-capture events.
 
 Hooks are user-configurable scripts in a directory that ALL run after capture.
-This module has NO dependencies on Systems - it's generic and portable.
+This module is generic and portable with no external dependencies.
 
 Directory structure:
     ~/.config/screenshot-tool/hooks/
     └── on_save.d/
-        ├── 10-systems-artifact.sh
+        ├── 10-upload.sh
         ├── 20-backup.sh
         └── 30-notify.sh
 
