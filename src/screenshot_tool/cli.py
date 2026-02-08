@@ -7,13 +7,22 @@ Entry point flow:
 """
 
 import argparse
+import json
 import logging
 import sys
 import time
 from pathlib import Path
 from typing import Optional
 
-from .config import Config, get_config
+from . import __version__
+from .config import (
+    Config,
+    config_defaults,
+    config_schema,
+    config_to_dict,
+    load_config,
+    validate_config_file,
+)
 from .instance import InstanceManager
 from .capture import fullscreen, region, window, CaptureError
 from .output import OutputOptions, save
@@ -37,6 +46,45 @@ Examples:
   %(prog)s --instant --output /tmp/shot.png --json  # Custom output with JSON metadata
   %(prog)s --instant --monitor eDP-1 # Capture specific monitor
 """,
+    )
+
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"screenshot-tool {__version__}",
+    )
+
+    parser.add_argument(
+        "--config",
+        metavar="PATH",
+        help="Path to config file (default: platform config dir)",
+    )
+
+    # Introspection
+    parser.add_argument(
+        "--print-defaults",
+        action="store_true",
+        help="Print default configuration as JSON and exit",
+    )
+    parser.add_argument(
+        "--print-config-schema",
+        action="store_true",
+        help="Print configuration schema as JSON and exit",
+    )
+    parser.add_argument(
+        "--validate-config",
+        action="store_true",
+        help="Validate configuration file and exit",
+    )
+    parser.add_argument(
+        "--print-hook-contract",
+        action="store_true",
+        help="Print hook contract as JSON and exit",
+    )
+    parser.add_argument(
+        "--print-resolved",
+        action="store_true",
+        help="Print resolved configuration as JSON and exit",
     )
 
     # Capture modes (mutually exclusive)
@@ -106,9 +154,9 @@ Examples:
         help="Print output path to stdout",
     )
     parser.add_argument(
-        "--json",
+        "--text",
         action="store_true",
-        help="Output metadata as JSON (path, width, height, timestamp)",
+        help="Human-readable output (log messages, notifications)",
     )
 
     # Additional options
@@ -144,9 +192,52 @@ def build_output_options(args: argparse.Namespace) -> OutputOptions:
         notification=not (args.no_notification or args.silent),
         sound=not (args.no_sound or args.silent),
         stdout=args.stdout,
-        json_output=args.json,
+        json_output=not getattr(args, 'text', False),
         silent=args.silent,
     )
+
+
+def _emit_json(payload: dict) -> None:
+    print(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _handle_introspection(args: argparse.Namespace) -> Optional[int]:
+    config_path = Path(args.config).expanduser() if args.config else None
+
+    if args.print_defaults:
+        _emit_json(config_defaults())
+        return 0
+
+    if args.print_config_schema:
+        _emit_json(config_schema())
+        return 0
+
+    if args.validate_config:
+        errors = validate_config_file(config_path)
+        if errors:
+            for error in errors:
+                print(error, file=sys.stderr)
+            return 1
+        return 0
+
+    if args.print_hook_contract:
+        _emit_json({
+            "events": [
+                {
+                    "name": "on_save",
+                    "args": ["output_path", "width", "height", "timestamp"],
+                    "description": "Called after a screenshot is saved",
+                }
+            ]
+        })
+        return 0
+
+    if args.print_resolved:
+        config = load_config(config_path=config_path)
+        _emit_json(config_to_dict(config))
+        return 0
+
+    return None
 
 
 def handle_instant_capture(
@@ -233,12 +324,18 @@ def main(args: Optional[list[str]] = None) -> int:
     Returns:
         Exit code
     """
-    config = get_config()
-    instance_mgr = InstanceManager(config)
-
     # STEP 1: Parse arguments first
     parser = create_argument_parser()
     parsed_args = parser.parse_args(args)
+
+    # Introspection flags short-circuit normal execution
+    result = _handle_introspection(parsed_args)
+    if result is not None:
+        return result
+
+    config_path = Path(parsed_args.config).expanduser() if parsed_args.config else None
+    config = load_config(config_path=config_path)
+    instance_mgr = InstanceManager(config)
 
     # Setup logging
     logging.basicConfig(

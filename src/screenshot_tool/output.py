@@ -22,6 +22,7 @@ gi.require_version("Notify", "0.7")
 from gi.repository import GdkPixbuf, Notify
 
 from .config import Config, get_config
+from .hooks import notify_save
 
 log = logging.getLogger(__name__)
 
@@ -42,7 +43,7 @@ class OutputOptions:
     stdout: bool = False  # Print path to stdout
     json_output: bool = False  # Output JSON metadata
 
-    # Silent mode - for MCP/scripting
+    # Silent mode - for scripting
     silent: bool = False  # Disables clipboard/notification/sound, uses tmp dir
 
     def __post_init__(self):
@@ -179,6 +180,9 @@ def save(
         height=height,
         timestamp=datetime.now().isoformat(),
     )
+
+    # Notify hooks (runs asynchronously, won't block)
+    notify_save(result, config)
 
     # Output modes
     if options.json_output:

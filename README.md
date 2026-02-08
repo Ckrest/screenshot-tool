@@ -22,7 +22,7 @@ cd screenshot-tool
 # Install Python dependencies
 pip install PyGObject pycairo PyYAML
 
-# Ensure wayland-capture is available (or set SCREENSHOT_WAYLAND_CAPTURE)
+# Ensure wayland-capture is available (or set SCREENSHOT_TOOL_WAYLAND_CAPTURE)
 ```
 
 ## Usage
@@ -72,9 +72,11 @@ Settings via environment variables or `~/.config/screenshot-tool/config.yaml`:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SCREENSHOT_WAYLAND_CAPTURE` | auto-detected | Path to wayland-capture binary |
-| `SCREENSHOT_OUTPUT_DIR` | `~/Pictures/screenshots` | Default save location |
-| `SCREENSHOT_DOUBLE_TAP_MS` | `500` | Double-tap detection window (ms) |
+| `SCREENSHOT_TOOL_WAYLAND_CAPTURE` | `wayland-capture` | Path to wayland-capture binary |
+| `SCREENSHOT_TOOL_DATA_DIR` | platform data dir | Base directory for persistent data |
+| `SCREENSHOT_TOOL_CACHE_DIR` | platform cache dir | Base directory for cache files |
+| `SCREENSHOT_TOOL_OUTPUT_DIR` | `~/Pictures/screenshots` | Default save location |
+| `SCREENSHOT_TOOL_DOUBLE_TAP_MS` | `500` | Double-tap detection window (ms) |
 
 ## Dependencies
 

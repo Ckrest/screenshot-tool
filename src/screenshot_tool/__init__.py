@@ -4,7 +4,7 @@ A screenshot utility with:
 - Interactive region/window selection
 - Magnifier for pixel-perfect positioning
 - Double-tap for instant fullscreen capture
-- CLI, hotkey, and MCP interfaces
+- CLI and hotkey interfaces
 """
 
 __version__ = "2.0.0"

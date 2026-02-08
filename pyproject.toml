@@ -1,0 +1,22 @@
+[project]
+name = "screenshot-tool"
+version = "2.0.0"
+description = "Wayland screenshot utility with region selection and annotation"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+    "pyyaml>=6.0",
+    "platformdirs>=3.0",
+    "PyGObject>=3.42",
+    "pycairo>=1.20",
+]
+
+[project.scripts]
+screenshot = "screenshot_tool.cli:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
