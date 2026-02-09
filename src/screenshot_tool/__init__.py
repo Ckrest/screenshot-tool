@@ -8,4 +8,4 @@ A screenshot utility with:
 """
 
 __version__ = "2.0.0"
-__author__ = "Nick"
+__author__ = "Ckrest"
