@@ -12,6 +12,7 @@ import json
 import logging
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -40,10 +41,56 @@ if _hooks_dir.is_dir() and (_hooks_dir / "__init__.py").exists():
     sys.modules["screenshot_tool_hooks"] = _hooks_mod
     _spec.loader.exec_module(_hooks_mod)
 from .capture import fullscreen, region, window, CaptureError
-from .output import OutputOptions, save
+from .output import OutputOptions, OutputResult, save
 from .wayfire import hide_cursor, show_cursor
 
 log = logging.getLogger(__name__)
+
+
+def _operation_type() -> str:
+    return "screenshot.capture"
+
+
+def _start_operation(mode: str, monitor: Optional[str]) -> str:
+    operation_id = str(uuid.uuid4())
+    emit("operation.started", {
+        "operation_type": _operation_type(),
+        "operation_id": operation_id,
+        "mode": mode,
+        "monitor": monitor,
+    })
+    return operation_id
+
+
+def _complete_operation(
+    operation_id: str,
+    mode: str,
+    monitor: Optional[str],
+    result: Optional[OutputResult] = None,
+    error_message: Optional[str] = None,
+) -> None:
+    payload = {
+        "operation_type": _operation_type(),
+        "operation_id": operation_id,
+        "mode": mode,
+        "monitor": monitor,
+    }
+
+    if result is None:
+        payload["success"] = False
+        payload["error_message"] = error_message or "operation failed"
+    else:
+        payload["outputs"] = [{
+            "file_path": str(result.path),
+            "file_type": "screenshot",
+        }]
+        payload["metadata"] = {
+            "width": result.width,
+            "height": result.height,
+            "timestamp": result.timestamp,
+        }
+
+    emit("operation.completed", payload)
 
 
 def create_argument_parser() -> argparse.ArgumentParser:
@@ -273,12 +320,17 @@ def _handle_introspection(args: argparse.Namespace) -> Optional[int]:
                 {
                     "event_type": "operation.started",
                     "lifecycle_point": "operation.started",
-                    "data_fields": ["mode", "monitor"],
+                    "data_fields": ["operation_type", "operation_id", "mode", "monitor"],
+                },
+                {
+                    "event_type": "operation.completed",
+                    "lifecycle_point": "artifact.created",
+                    "data_fields": ["operation_type", "operation_id", "outputs", "metadata", "mode", "monitor"],
                 },
                 {
                     "event_type": "artifact.created",
                     "lifecycle_point": "artifact.created",
-                    "data_fields": ["output_path", "width", "height", "format", "timestamp"],
+                    "data_fields": ["file_path", "file_type", "metadata"],
                 },
                 {
                     "event_type": "error.handled",
@@ -311,14 +363,26 @@ def handle_instant_capture(
     options: OutputOptions,
 ) -> int:
     """Handle instant fullscreen capture."""
-    emit("operation.started", {"mode": "instant", "monitor": args.monitor})
+    operation_id = _start_operation("instant", args.monitor)
     try:
         temp_path = fullscreen(monitor=args.monitor, config=config)
-        save(temp_path, options, config)
+        result = save(temp_path, options, config)
         temp_path.unlink(missing_ok=True)
+        _complete_operation(
+            operation_id=operation_id,
+            mode="instant",
+            monitor=args.monitor,
+            result=result,
+        )
         return 0
     except CaptureError as e:
         emit("error.handled", {"error_type": "CaptureError", "message": str(e), "mode": "instant"})
+        _complete_operation(
+            operation_id=operation_id,
+            mode="instant",
+            monitor=args.monitor,
+            error_message=str(e),
+        )
         log.error("Capture failed: %s", e)
         return 1
 
@@ -336,14 +400,26 @@ def handle_region_capture(
         log.error("Invalid region format. Use X,Y,W,H (e.g., 100,100,800,600)")
         return 1
 
-    emit("operation.started", {"mode": "region", "monitor": args.monitor})
+    operation_id = _start_operation("region", args.monitor)
     try:
         temp_path = region(x, y, w, h, config=config)
-        save(temp_path, options, config)
+        result = save(temp_path, options, config)
         temp_path.unlink(missing_ok=True)
+        _complete_operation(
+            operation_id=operation_id,
+            mode="region",
+            monitor=args.monitor,
+            result=result,
+        )
         return 0
     except CaptureError as e:
         emit("error.handled", {"error_type": "CaptureError", "message": str(e), "mode": "region"})
+        _complete_operation(
+            operation_id=operation_id,
+            mode="region",
+            monitor=args.monitor,
+            error_message=str(e),
+        )
         log.error("Capture failed: %s", e)
         return 1
 
@@ -354,14 +430,26 @@ def handle_window_capture(
     options: OutputOptions,
 ) -> int:
     """Handle window capture."""
-    emit("operation.started", {"mode": "window", "monitor": args.monitor})
+    operation_id = _start_operation("window", args.monitor)
     try:
         temp_path = window(args.window, config=config)
-        save(temp_path, options, config)
+        result = save(temp_path, options, config)
         temp_path.unlink(missing_ok=True)
+        _complete_operation(
+            operation_id=operation_id,
+            mode="window",
+            monitor=args.monitor,
+            result=result,
+        )
         return 0
     except CaptureError as e:
         emit("error.handled", {"error_type": "CaptureError", "message": str(e), "mode": "window"})
+        _complete_operation(
+            operation_id=operation_id,
+            mode="window",
+            monitor=args.monitor,
+            error_message=str(e),
+        )
         log.error("Capture failed: %s", e)
         return 1
 
@@ -441,15 +529,27 @@ def main(args: Optional[list[str]] = None) -> int:
         instance_mgr.kill_running()
         instance_mgr.cleanup_stale_lock()
 
-        emit("operation.started", {"mode": "instant", "monitor": None})
+        operation_id = _start_operation("instant", None)
         # Take instant screenshot with cursor hidden
         hide_cursor()
         try:
             temp_path = fullscreen(config=config)
-            save(temp_path, OutputOptions(), config)
+            result = save(temp_path, OutputOptions(), config)
             temp_path.unlink(missing_ok=True)
+            _complete_operation(
+                operation_id=operation_id,
+                mode="instant",
+                monitor=None,
+                result=result,
+            )
         except CaptureError as e:
             emit("error.handled", {"error_type": "CaptureError", "message": str(e), "mode": "instant"})
+            _complete_operation(
+                operation_id=operation_id,
+                mode="instant",
+                monitor=None,
+                error_message=str(e),
+            )
             log.error("Capture failed: %s", e)
             return 1
         finally:
@@ -474,7 +574,6 @@ def main(args: Optional[list[str]] = None) -> int:
         return handle_instant_capture(parsed_args, config, options)
 
     # Default: interactive mode
-    emit("operation.started", {"mode": "interactive", "monitor": None})
     # Hide cursor before starting interactive mode
     hide_cursor()
     try:

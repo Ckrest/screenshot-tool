@@ -4,6 +4,7 @@ import logging
 import os
 import signal
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -17,6 +18,7 @@ from gi.repository import Gtk, Gdk, GdkPixbuf, GLib, GtkLayerShell
 
 from ..config import Config, get_config
 from ..capture import fullscreen as capture_fullscreen, window as capture_window
+from ..emit import emit
 from ..output import OutputOptions, save, save_pixbuf
 from ..wayfire import (
     get_cursor_position,
@@ -38,6 +40,41 @@ log = logging.getLogger(__name__)
 
 # Global instance for signal handler
 _overlay_instance: Optional["ScreenshotOverlay"] = None
+
+
+def _operation_type() -> str:
+    return "screenshot.capture"
+
+
+def _start_operation(mode: str) -> str:
+    operation_id = str(uuid.uuid4())
+    emit("operation.started", {
+        "operation_type": _operation_type(),
+        "operation_id": operation_id,
+        "mode": mode,
+        "monitor": None,
+    })
+    return operation_id
+
+
+def _complete_operation(
+    operation_id: str,
+    mode: str,
+    output_path: Optional[str] = None,
+    error_message: Optional[str] = None,
+) -> None:
+    payload = {
+        "operation_type": _operation_type(),
+        "operation_id": operation_id,
+        "mode": mode,
+        "monitor": None,
+    }
+    if output_path is None:
+        payload["success"] = False
+        payload["error_message"] = error_message or "operation failed"
+    else:
+        payload["outputs"] = [{"file_path": output_path, "file_type": "screenshot"}]
+    emit("operation.completed", payload)
 
 
 def _glib_signal_handler():
@@ -298,26 +335,36 @@ class ScreenshotOverlay(Gtk.Window):
 
     def _take_window_screenshot(self, window: dict):
         """Capture a specific window."""
+        operation_id = _start_operation("window")
         try:
             app_id = window.get("app_id", "")
             if not app_id:
                 log.error("Window has no app_id")
+                _complete_operation(operation_id, "window", error_message="window has no app_id")
                 return
 
             temp_path = capture_window(app_id, config=self.config)
-            save(temp_path, OutputOptions(), self.config)
+            result = save(temp_path, OutputOptions(), self.config)
             temp_path.unlink(missing_ok=True)
+            _complete_operation(operation_id, "window", output_path=str(result.path))
         except Exception as e:
+            emit("error.handled", {"error_type": "CaptureError", "message": str(e), "mode": "window"})
+            _complete_operation(operation_id, "window", error_message=str(e))
             log.error("Error capturing window: %s", e)
         finally:
             self._cleanup_and_exit()
 
     def _take_screenshot(self, x: int, y: int, w: int, h: int):
         """Capture a region of the frozen screenshot."""
+        mode = "instant" if (x, y, w, h) == (0, 0, self.img_width, self.img_height) else "region"
+        operation_id = _start_operation(mode)
         try:
             cropped = self.screenshot.new_subpixbuf(x, y, w, h)
-            save_pixbuf(cropped, OutputOptions(), self.config)
+            result = save_pixbuf(cropped, OutputOptions(), self.config)
+            _complete_operation(operation_id, mode, output_path=str(result.path))
         except Exception as e:
+            emit("error.handled", {"error_type": "CaptureError", "message": str(e), "mode": mode})
+            _complete_operation(operation_id, mode, error_message=str(e))
             log.error("Error saving screenshot: %s", e)
         finally:
             self._cleanup_and_exit()

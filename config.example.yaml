@@ -15,9 +15,9 @@ output_dir: ~/Pictures/screenshots
 silent_output_dir: /tmp
 wayland_capture: wayland-capture
 
-# Storage directories (platformdirs defaults)
-data_dir: ~/.local/share/screenshot-tool
-cache_dir: ~/.cache/screenshot-tool
+# Storage (auto-detected for your platform, uncomment to override)
+# data_dir:
+# cache_dir:
 
-# Hook scripts directory
-hooks_dir: ~/.config/screenshot-tool/hooks
+# Hook scripts directory (auto-detected, uncomment to override)
+# hooks_dir:

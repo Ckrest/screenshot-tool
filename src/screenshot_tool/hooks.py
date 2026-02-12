@@ -3,8 +3,8 @@
 Hooks are user-configurable scripts in a directory that ALL run after capture.
 This module is generic and portable with no external dependencies.
 
-Directory structure:
-    ~/.config/screenshot-tool/hooks/
+Directory structure (hooks_dir resolved by platformdirs):
+    <hooks_dir>/
     └── on_save.d/
         ├── 10-upload.sh
         ├── 20-backup.sh
@@ -34,7 +34,7 @@ def run_hooks(hooks_dir: Optional[Path], event: str, *args) -> None:
     """Run all hook scripts for an event.
 
     Args:
-        hooks_dir: Base hooks directory (e.g., ~/.config/screenshot-tool/hooks/)
+        hooks_dir: Base hooks directory (resolved by platformdirs at runtime)
         event: Event name (e.g., "on_save") - looks for {event}.d/ subdirectory
         *args: Arguments to pass to each script
     """

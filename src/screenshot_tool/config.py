@@ -3,7 +3,7 @@
 Configuration priority (highest to lowest):
 1. CLI overrides (passed to load_config)
 2. Environment variables (SCREENSHOT_TOOL_*)
-3. Config file (~/.config/screenshot-tool/config.yaml)
+3. Config file (platformdirs config dir / config.yaml)
 4. Built-in defaults
 """
 

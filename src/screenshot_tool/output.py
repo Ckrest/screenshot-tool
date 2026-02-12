@@ -185,11 +185,14 @@ def save(
 
     # Emit artifact.created event
     emit("artifact.created", {
-        "output_path": str(output_path),
-        "width": width,
-        "height": height,
-        "format": options.output_format,
-        "timestamp": result.timestamp,
+        "file_path": str(output_path),
+        "file_type": "screenshot",
+        "metadata": {
+            "width": width,
+            "height": height,
+            "format": options.output_format,
+            "timestamp": result.timestamp,
+        },
     })
 
     # Notify hooks (runs asynchronously, won't block)
