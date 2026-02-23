@@ -21,7 +21,6 @@ gi.require_version("GdkPixbuf", "2.0")
 from gi.repository import GdkPixbuf
 
 from .config import Config, get_config
-from .emit import emit
 from .hooks import notify_save
 
 log = logging.getLogger(__name__)
@@ -182,18 +181,6 @@ def save(
         height=height,
         timestamp=datetime.now().isoformat(),
     )
-
-    # Emit artifact.created event
-    emit("artifact.created", {
-        "file_path": str(output_path),
-        "file_type": "screenshot",
-        "metadata": {
-            "width": width,
-            "height": height,
-            "format": options.output_format,
-            "timestamp": result.timestamp,
-        },
-    })
 
     # Notify hooks (runs asynchronously, won't block)
     notify_save(result, config)
