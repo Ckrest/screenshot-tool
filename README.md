@@ -58,16 +58,21 @@ screenshot --window kitty
 screenshot --instant --silent --json
 ```
 
-### Hotkey Setup (Wayfire)
+### Hotkey Setup
 
-```ini
-# ~/.config/wayfire.ini
-[command]
-binding_screenshot = KEY_SYSRQ
-command_screenshot = screenshot
-```
+This package declares its hotkey actions through Systems
+`trait_hotkey-actions.yaml`. On Wayfire, `wayfire-keybindings` discovers those
+actions and renders the compositor bindings.
 
-**Double-tap** the hotkey for instant fullscreen capture.
+Current defaults:
+
+| Action | Binding |
+|--------|---------|
+| Screenshot | `PrintScreen` |
+| Interactive Screenshot | `Shift+PrintScreen` |
+| Silent Fullscreen Screenshot | leader sequence `s f` |
+
+**Double-tap** the screenshot hotkey for instant fullscreen capture.
 
 ### Interactive Controls
 
