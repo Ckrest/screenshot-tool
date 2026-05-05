@@ -3,7 +3,7 @@
 A screenshot utility with:
 - Interactive region/window selection
 - Magnifier for pixel-perfect positioning
-- Double-tap for instant fullscreen capture
+- Press-again fullscreen capture while the UI is open
 - CLI and hotkey interfaces
 """
 

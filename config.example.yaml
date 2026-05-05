@@ -5,8 +5,6 @@
 #
 default_format: png
 default_quality: 90
-double_tap_file: /tmp/screenshot-tool.doubletap
-double_tap_ms: 500
 enable_clipboard: true
 enable_notification: true
 enable_sound: true

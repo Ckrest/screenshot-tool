@@ -1,8 +1,7 @@
-"""Single-instance management and double-tap detection.
+"""Single-instance management.
 
 This module handles:
 - Lock file for single instance enforcement
-- Double-tap detection for instant screenshot
 - Signal handling for communicating with running instance
 """
 
@@ -10,8 +9,6 @@ import fcntl
 import logging
 import os
 import signal
-import time
-from pathlib import Path
 from typing import Optional, TextIO
 
 from .config import Config
@@ -20,46 +17,11 @@ log = logging.getLogger(__name__)
 
 
 class InstanceManager:
-    """Manages single-instance behavior and double-tap detection."""
+    """Manages single-instance behavior."""
 
     def __init__(self, config: Config):
         self.config = config
         self._lock_fd: Optional[TextIO] = None
-
-    def check_double_tap(self) -> bool:
-        """Check if this invocation is a double-tap.
-
-        A double-tap occurs when the tool is invoked twice within
-        the configured time window (default: 500ms).
-
-        Side effect: Records the current timestamp for future checks.
-
-        Returns:
-            True if this is a double-tap, False otherwise
-        """
-        now_ms = int(time.time() * 1000)
-        is_double_tap = False
-
-        double_tap_file = self.config.double_tap_file
-        try:
-            if double_tap_file.exists():
-                last_ms = int(double_tap_file.read_text().strip())
-                diff = now_ms - last_ms
-                if diff < self.config.double_tap_ms:
-                    is_double_tap = True
-                    double_tap_file.unlink(missing_ok=True)
-                    log.debug("Double-tap detected (diff=%dms)", diff)
-        except (ValueError, OSError) as e:
-            log.debug("Could not read double-tap file: %s", e)
-
-        # Record this invocation time (unless it was a double-tap)
-        if not is_double_tap:
-            try:
-                double_tap_file.write_text(str(now_ms))
-            except OSError as e:
-                log.debug("Could not write double-tap file: %s", e)
-
-        return is_double_tap
 
     def acquire_lock(self) -> bool:
         """Try to acquire the lock file.
@@ -139,32 +101,6 @@ class InstanceManager:
             return True
         except OSError as e:
             log.debug("Failed to send signal: %s", e)
-            return False
-
-    def kill_running(self) -> bool:
-        """Kill the running instance.
-
-        Returns:
-            True if instance was killed, False otherwise
-        """
-        pid = self.get_running_pid()
-        if pid is None:
-            return False
-
-        try:
-            os.kill(pid, signal.SIGTERM)
-            # Wait a bit for cleanup
-            time.sleep(0.1)
-            # Force kill if still running
-            try:
-                os.kill(pid, 0)
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            log.debug("Killed PID %d", pid)
-            return True
-        except OSError as e:
-            log.debug("Failed to kill: %s", e)
             return False
 
     def cleanup_stale_lock(self):

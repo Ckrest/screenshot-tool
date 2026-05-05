@@ -7,7 +7,7 @@ A feature-rich screenshot utility for Wayland/Wayfire with interactive selection
 - **Interactive overlay**: Frozen screen with selection tools
 - **Window capture**: Click to capture individual windows (via `ext-image-copy-capture`)
 - **Region selection**: Drag to select custom areas with live dimensions
-- **Full screen**: Instant capture with hotkey double-tap
+- **Full screen**: Press the screenshot key again while the UI is open
 - **Magnifier**: 9x9 pixel grid with zoom for precise positioning
 - **Arrow keys**: Fine-tune cursor position (1px at a time)
 - **Multiple outputs**: Clipboard, notification, sound, JSON metadata
@@ -72,7 +72,8 @@ Current defaults:
 | Interactive Screenshot | `Shift+PrintScreen` |
 | Silent Fullscreen Screenshot | leader sequence `s f` |
 
-**Double-tap** the screenshot hotkey for instant fullscreen capture.
+Press the screenshot hotkey again while the UI is open to capture fullscreen
+and close the UI cleanly.
 
 ### Interactive Controls
 
@@ -95,7 +96,6 @@ Settings via environment variables or `~/.config/screenshot-tool/config.yaml`:
 | `SCREENSHOT_TOOL_DATA_DIR` | platform data dir | Base directory for persistent data |
 | `SCREENSHOT_TOOL_CACHE_DIR` | platform cache dir | Base directory for cache files |
 | `SCREENSHOT_TOOL_OUTPUT_DIR` | `~/Pictures/screenshots` | Default save location |
-| `SCREENSHOT_TOOL_DOUBLE_TAP_MS` | `500` | Double-tap detection window (ms) |
 
 ## Dependencies
 

@@ -35,14 +35,12 @@ class Config:
     default_quality: int = 90
 
     # Behavior
-    double_tap_ms: int = 500
     enable_sound: bool = True
     enable_notification: bool = True
     enable_clipboard: bool = True
 
     # Paths
     lock_file: Path = field(default_factory=lambda: Path("/tmp/screenshot-tool.lock"))
-    double_tap_file: Path = field(default_factory=lambda: Path("/tmp/screenshot-tool.doubletap"))
 
     # Silent mode output (for scripting)
     silent_output_dir: Path = field(default_factory=lambda: Path("/tmp"))
@@ -60,8 +58,6 @@ class Config:
             self.output_dir = Path(self.output_dir)
         if isinstance(self.lock_file, str):
             self.lock_file = Path(self.lock_file)
-        if isinstance(self.double_tap_file, str):
-            self.double_tap_file = Path(self.double_tap_file)
         if isinstance(self.silent_output_dir, str):
             self.silent_output_dir = Path(self.silent_output_dir)
         if isinstance(self.hooks_dir, str):
@@ -74,7 +70,6 @@ PATH_KEYS = {
     "cache_dir",
     "output_dir",
     "lock_file",
-    "double_tap_file",
     "silent_output_dir",
     "hooks_dir",
 }
@@ -123,12 +118,10 @@ def config_defaults() -> dict:
         "output_dir": str(Path.home() / "Pictures" / "screenshots"),
         "default_format": "png",
         "default_quality": 90,
-        "double_tap_ms": 500,
         "enable_sound": True,
         "enable_notification": True,
         "enable_clipboard": True,
         "lock_file": "/tmp/screenshot-tool.lock",
-        "double_tap_file": "/tmp/screenshot-tool.doubletap",
         "silent_output_dir": "/tmp",
         "hooks_dir": str(CONFIG_DIR / "hooks"),
     }
@@ -144,9 +137,7 @@ def _load_env_overrides() -> dict:
         "OUTPUT_DIR": "output_dir",
         "DEFAULT_FORMAT": "default_format",
         "DEFAULT_QUALITY": "default_quality",
-        "DOUBLE_TAP_MS": "double_tap_ms",
         "LOCK_FILE": "lock_file",
-        "DOUBLE_TAP_FILE": "double_tap_file",
         "SILENT_OUTPUT_DIR": "silent_output_dir",
         "HOOKS_DIR": "hooks_dir",
     }
@@ -155,11 +146,11 @@ def _load_env_overrides() -> dict:
         value = _env(env_name)
         if value is None:
             continue
-        if key in {"output_dir", "lock_file", "double_tap_file", "silent_output_dir", "hooks_dir"}:
+        if key in {"output_dir", "lock_file", "silent_output_dir", "hooks_dir"}:
             config[key] = _expand_path(value)
         elif key in {"data_dir", "cache_dir"}:
             config[key] = _expand_path(value)
-        elif key in {"double_tap_ms", "default_quality"}:
+        elif key == "default_quality":
             try:
                 config[key] = int(value)
             except ValueError:
@@ -236,12 +227,10 @@ def config_schema() -> dict:
             "output_dir": {"type": "string"},
             "default_format": {"type": "string", "enum": sorted(DEFAULT_FORMATS)},
             "default_quality": {"type": "integer", "minimum": 1, "maximum": 100},
-            "double_tap_ms": {"type": "integer", "minimum": 0},
             "enable_sound": {"type": "boolean"},
             "enable_notification": {"type": "boolean"},
             "enable_clipboard": {"type": "boolean"},
             "lock_file": {"type": "string"},
-            "double_tap_file": {"type": "string"},
             "silent_output_dir": {"type": "string"},
             "hooks_dir": {"type": ["string", "null"]},
         },
@@ -294,8 +283,6 @@ def validate_config_dict(data: Any) -> list[str]:
         if key == "default_quality" and _is_int(value):
             if value < 1 or value > 100:
                 errors.append("default_quality must be between 1 and 100")
-        if key == "double_tap_ms" and _is_int(value) and value < 0:
-            errors.append("double_tap_ms must be >= 0")
 
     return errors
 
@@ -321,12 +308,10 @@ def config_to_dict(config: Config) -> dict:
         "output_dir": _format(config.output_dir),
         "default_format": config.default_format,
         "default_quality": config.default_quality,
-        "double_tap_ms": config.double_tap_ms,
         "enable_sound": config.enable_sound,
         "enable_notification": config.enable_notification,
         "enable_clipboard": config.enable_clipboard,
         "lock_file": _format(config.lock_file),
-        "double_tap_file": _format(config.double_tap_file),
         "silent_output_dir": _format(config.silent_output_dir),
         "hooks_dir": _format(config.hooks_dir) if config.hooks_dir else None,
     }

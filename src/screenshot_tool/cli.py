@@ -1,9 +1,8 @@
 """Command-line interface for Screenshot Tool.
 
 Entry point flow:
-1. Check for double-tap FIRST (before arg parsing)
-2. Parse arguments
-3. Route to appropriate mode: instant, region, window, or interactive
+1. Parse arguments
+2. Route to explicit capture modes or the default interactive singleton
 """
 
 import argparse
@@ -519,42 +518,6 @@ def main(args: Optional[list[str]] = None) -> int:
         level=logging.DEBUG if parsed_args.debug else logging.INFO,
         format="%(levelname)s: %(message)s",
     )
-
-    # STEP 2: Check for double-tap ONLY when no explicit capture mode
-    # Double-tap is a hotkey feature for interactive mode, not for CLI with explicit args
-    has_explicit_mode = parsed_args.instant or parsed_args.region or parsed_args.window
-    if not has_explicit_mode and instance_mgr.check_double_tap():
-        log.debug("Double-tap detected - instant screenshot")
-        # Kill any running UI first
-        instance_mgr.kill_running()
-        instance_mgr.cleanup_stale_lock()
-
-        operation_id = _start_operation("instant", None)
-        # Take instant screenshot with cursor hidden
-        hide_cursor()
-        try:
-            temp_path = fullscreen(config=config)
-            result = save(temp_path, OutputOptions(), config)
-            temp_path.unlink(missing_ok=True)
-            _complete_operation(
-                operation_id=operation_id,
-                mode="instant",
-                monitor=None,
-                result=result,
-            )
-        except CaptureError as e:
-            emit("error.handled", {"error_type": "CaptureError", "message": str(e), "mode": "instant"})
-            _complete_operation(
-                operation_id=operation_id,
-                mode="instant",
-                monitor=None,
-                error_message=str(e),
-            )
-            log.error("Capture failed: %s", e)
-            return 1
-        finally:
-            show_cursor()
-        return 0
 
     # Handle delay
     if parsed_args.delay:
