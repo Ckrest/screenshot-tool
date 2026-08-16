@@ -1,549 +1,262 @@
-"""Command-line interface for Screenshot Tool.
+"""Thin D-Bus client for the persistent Screenshot Tool service."""
 
-Entry point flow:
-1. Parse arguments
-2. Route to explicit capture modes or the default interactive singleton
-"""
+from __future__ import annotations
 
 import argparse
-import atexit
 import json
-import logging
 import sys
-import time
 import uuid
 from pathlib import Path
-from typing import Optional
+from typing import Any
+
+from gi.repository import Gio, GLib
 
 from . import __version__
 from .config import (
-    Config,
     config_defaults,
     config_schema,
     config_to_dict,
     load_config,
     validate_config_file,
 )
-from .emit import emit, configure
-from .instance import InstanceManager
-
-# Bootstrap hooks package from package root hooks/ directory
-import importlib.util as _ilu
-_hooks_dir = Path(__file__).parent.parent.parent / "hooks"
-if _hooks_dir.is_dir() and (_hooks_dir / "__init__.py").exists():
-    _spec = _ilu.spec_from_file_location(
-        "screenshot_tool_hooks",
-        _hooks_dir / "__init__.py",
-        submodule_search_locations=[str(_hooks_dir)]
-    )
-    _hooks_mod = _ilu.module_from_spec(_spec)
-    sys.modules["screenshot_tool_hooks"] = _hooks_mod
-    _spec.loader.exec_module(_hooks_mod)
-from .capture import fullscreen, region, window, CaptureError
-from .output import OutputOptions, OutputResult, save
-from .wayfire import hide_cursor, show_cursor
-
-log = logging.getLogger(__name__)
-
-
-def _operation_type() -> str:
-    return "screenshot.capture"
-
-
-def _start_operation(mode: str, monitor: Optional[str]) -> str:
-    operation_id = str(uuid.uuid4())
-    emit("operation.started", {
-        "operation_type": _operation_type(),
-        "operation_id": operation_id,
-        "mode": mode,
-        "monitor": monitor,
-    })
-    return operation_id
-
-
-def _complete_operation(
-    operation_id: str,
-    mode: str,
-    monitor: Optional[str],
-    result: Optional[OutputResult] = None,
-    error_message: Optional[str] = None,
-) -> None:
-    payload = {
-        "operation_type": _operation_type(),
-        "operation_id": operation_id,
-        "mode": mode,
-        "monitor": monitor,
-    }
-
-    if result is None:
-        payload["success"] = False
-        payload["error_message"] = error_message or "operation failed"
-    else:
-        payload["outputs"] = [{
-            "file_path": str(result.path),
-            "file_type": "screenshot",
-        }]
-        payload["metadata"] = {
-            "width": result.width,
-            "height": result.height,
-            "timestamp": result.timestamp,
-        }
-
-    emit("operation.completed", payload)
+from .dbus_api import BUS_NAME, INTERFACE, OBJECT_PATH
 
 
 def create_argument_parser() -> argparse.ArgumentParser:
-    """Create comprehensive argument parser for CLI usage."""
-    parser = argparse.ArgumentParser(
-        description="Screenshot Tool for Wayland/Wayfire",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  %(prog)s                           # Interactive mode (default)
-  %(prog)s --instant                 # Instant full screen capture
-  %(prog)s --region 100,100,800,600  # Capture specific region
-  %(prog)s --window kitty            # Capture window by app-id
-  %(prog)s --instant --silent        # Silent capture (no clipboard/notification/sound)
-  %(prog)s --instant --output /tmp/shot.png --json  # Custom output with JSON metadata
-  %(prog)s --instant --monitor eDP-1 # Capture specific monitor
-""",
-    )
-
+    parser = argparse.ArgumentParser(description="Screenshot Tool for Wayland/Wayfire")
     parser.add_argument(
-        "--version",
-        action="version",
-        version=f"screenshot-tool {__version__}",
+        "--version", action="version", version=f"screenshot-tool {__version__}"
     )
-
-    parser.add_argument(
-        "--config",
-        metavar="PATH",
-        help="Path to config file (default: platform config dir)",
-    )
-
-    # Introspection
-    parser.add_argument(
-        "--print-defaults",
-        action="store_true",
-        help="Print default configuration as JSON and exit",
-    )
-    parser.add_argument(
-        "--print-config-schema",
-        action="store_true",
-        help="Print configuration schema as JSON and exit",
-    )
-    parser.add_argument(
-        "--validate-config",
-        action="store_true",
-        help="Validate configuration file and exit",
-    )
-    parser.add_argument(
-        "--print-hook-contract",
-        action="store_true",
-        help="Print hook contract as JSON and exit",
-    )
-    parser.add_argument(
-        "--print-resolved",
-        action="store_true",
-        help="Print resolved configuration as JSON and exit",
-    )
-    parser.add_argument(
-        "--print-event-catalog",
-        action="store_true",
-        help="Print event catalog as JSON and exit",
-    )
-    parser.add_argument(
-        "--print-lifecycle",
-        action="store_true",
-        help="Print lifecycle points as JSON and exit",
-    )
-
-    # Capture modes (mutually exclusive)
-    capture_group = parser.add_mutually_exclusive_group()
-    capture_group.add_argument(
+    parser.add_argument("--config", metavar="PATH")
+    parser.add_argument("--print-defaults", action="store_true")
+    parser.add_argument("--print-config-schema", action="store_true")
+    parser.add_argument("--validate-config", action="store_true")
+    parser.add_argument("--print-resolved", action="store_true")
+    parser.add_argument("--print-hook-contract", action="store_true")
+    parser.add_argument("--print-event-catalog", action="store_true")
+    parser.add_argument("--print-lifecycle", action="store_true")
+    parser.add_argument("--list-windows", action="store_true")
+    parser.add_argument("--status", action="store_true", help="Show the service state")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument(
         "--instant",
         action="store_true",
-        help="Take instant full screen screenshot (no UI)",
+        help="Capture fullscreen without opening the UI",
     )
-    capture_group.add_argument(
-        "--region",
-        metavar="X,Y,W,H",
-        help="Capture specific region (e.g., 100,100,800,600)",
-    )
-    capture_group.add_argument(
-        "--window",
-        metavar="APP_ID",
-        help="Capture window by app-id (e.g., kitty, brave-browser)",
-    )
-
-    # Output options
-    parser.add_argument(
-        "--output", "-o",
-        metavar="PATH",
-        help="Custom output path (default: ~/Pictures/screenshots/screenshot_<timestamp>.png)",
-    )
-    parser.add_argument(
-        "--format", "-f",
-        choices=["png", "jpg", "jpeg", "webp"],
-        default="png",
-        help="Output format (default: png)",
-    )
-    parser.add_argument(
-        "--quality", "-q",
-        type=int,
-        default=90,
-        metavar="1-100",
-        help="Quality for lossy formats (default: 90)",
-    )
-
-    # Behavior options
-    parser.add_argument(
-        "--no-clipboard",
-        action="store_true",
-        help="Do not copy to clipboard",
-    )
-    parser.add_argument(
-        "--no-notification",
-        action="store_true",
-        help="Do not show notification",
-    )
-    parser.add_argument(
-        "--no-sound",
-        action="store_true",
-        help="Do not play shutter sound",
-    )
-    parser.add_argument(
-        "--silent",
-        action="store_true",
-        help="Silent mode: no clipboard, no notification, no sound",
-    )
-
-    # Output modes
-    parser.add_argument(
-        "--stdout",
-        action="store_true",
-        help="Print output path to stdout",
-    )
-    parser.add_argument(
-        "--json",
-        action="store_true",
-        help="Output JSON metadata to stdout",
-    )
-
-    # Additional options
-    parser.add_argument(
-        "--delay",
-        type=int,
-        metavar="MS",
-        help="Delay before capture in milliseconds",
-    )
-    parser.add_argument(
-        "--monitor",
-        metavar="NAME",
-        help="Capture specific monitor (e.g., eDP-1, HDMI-A-1)",
-    )
-
-    # Debug
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Enable debug logging",
-    )
-
+    modes.add_argument("--region", metavar="X,Y,W,H")
+    modes.add_argument("--window", metavar="APP_ID")
+    parser.add_argument("--output", "-o", metavar="PATH")
+    parser.add_argument("--format", "-f", choices=["png", "jpg", "jpeg", "webp"])
+    parser.add_argument("--quality", "-q", type=int, metavar="1-100")
+    parser.add_argument("--no-clipboard", action="store_true")
+    parser.add_argument("--no-notification", action="store_true")
+    parser.add_argument("--no-sound", action="store_true")
+    parser.add_argument("--silent", action="store_true")
+    parser.add_argument("--stdout", action="store_true")
+    parser.add_argument("--json", action="store_true")
+    parser.add_argument("--delay", type=int, metavar="MS", default=0)
+    parser.add_argument("--monitor", metavar="NAME")
+    parser.add_argument("--debug", action="store_true")
     return parser
 
 
-def build_output_options(args: argparse.Namespace) -> OutputOptions:
-    """Build OutputOptions from parsed arguments."""
-    return OutputOptions(
-        output_path=Path(args.output) if args.output else None,
-        output_format=args.format,
-        quality=args.quality,
-        clipboard=not (args.no_clipboard or args.silent),
-        notification=not (args.no_notification or args.silent),
-        sound=not (args.no_sound or args.silent),
-        stdout=args.stdout,
-        json_output=args.json or args.silent,
-        silent=args.silent,
-    )
-
-
-def _emit_json(payload: dict) -> None:
+def _print(payload: Any) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
-def _handle_introspection(args: argparse.Namespace) -> Optional[int]:
+def _introspection(args) -> int | None:
     config_path = Path(args.config).expanduser() if args.config else None
-
     if args.print_defaults:
-        _emit_json(config_defaults())
+        _print(config_defaults())
         return 0
-
     if args.print_config_schema:
-        _emit_json(config_schema())
+        _print(config_schema())
         return 0
-
     if args.validate_config:
         errors = validate_config_file(config_path)
         if errors:
-            for error in errors:
-                print(error, file=sys.stderr)
+            print("\n".join(errors), file=sys.stderr)
             return 1
         return 0
-
-    if args.print_hook_contract:
-        _emit_json({
-            "events": [
-                {
-                    "name": "on_save",
-                    "args": ["output_path", "width", "height", "timestamp"],
-                    "description": "Called after a screenshot is saved",
-                }
-            ]
-        })
-        return 0
-
     if args.print_resolved:
-        config = load_config(config_path=config_path)
-        _emit_json(config_to_dict(config))
+        _print(config_to_dict(load_config(config_path)))
         return 0
-
+    if args.print_hook_contract:
+        _print(
+            {
+                "events": [
+                    {
+                        "name": "on_save",
+                        "args": ["output_path", "width", "height", "timestamp"],
+                    }
+                ]
+            }
+        )
+        return 0
     if args.print_event_catalog:
-        _emit_json({
-            "catalog": [
-                {
-                    "event_type": "config.resolved",
-                    "lifecycle_point": "config.loaded",
-                    "data_fields": ["config_path", "source"],
-                },
-                {
-                    "event_type": "operation.started",
-                    "lifecycle_point": "operation.started",
-                    "data_fields": ["operation_type", "operation_id", "mode", "monitor"],
-                },
-                {
-                    "event_type": "operation.completed",
-                    "lifecycle_point": "artifact.created",
-                    "data_fields": ["operation_type", "operation_id", "outputs", "metadata", "mode", "monitor"],
-                },
-                {
-                    "event_type": "artifact.created",
-                    "lifecycle_point": "artifact.created",
-                    "data_fields": ["file_path", "file_type", "metadata"],
-                },
-                {
-                    "event_type": "error.handled",
-                    "lifecycle_point": "error.occurred",
-                    "data_fields": ["error_type", "message", "mode"],
-                },
-            ]
-        })
+        _print({"signals": ["Completed", "Failed"], "interface": INTERFACE})
         return 0
-
     if args.print_lifecycle:
-        _emit_json({
-            "points": [
-                "startup",
-                "config.loaded",
-                "operation.started",
-                "artifact.created",
-                "error.occurred",
-                "shutdown",
-            ]
-        })
+        _print({"states": ["idle", "freezing", "selecting", "saving"]})
         return 0
+    if args.list_windows:
+        from .window import enumerate_windows
 
+        _print(
+            {
+                "windows": [
+                    {
+                        "app_id": w.app_id,
+                        "title": w.title,
+                        "capture_id": w.capture_id,
+                        "view_id": w.view_id,
+                        "geometry": w.geometry,
+                    }
+                    for w in enumerate_windows(load_config(config_path))
+                ]
+            }
+        )
+        return 0
     return None
 
 
-def handle_instant_capture(
-    args: argparse.Namespace,
-    config: Config,
-    options: OutputOptions,
-) -> int:
-    """Handle instant fullscreen capture."""
-    operation_id = _start_operation("instant", args.monitor)
-    try:
-        temp_path = fullscreen(monitor=args.monitor, config=config)
-        result = save(temp_path, options, config)
-        temp_path.unlink(missing_ok=True)
-        _complete_operation(
-            operation_id=operation_id,
-            mode="instant",
-            monitor=args.monitor,
-            result=result,
-        )
-        return 0
-    except CaptureError as e:
-        emit("error.handled", {"error_type": "CaptureError", "message": str(e), "mode": "instant"})
-        _complete_operation(
-            operation_id=operation_id,
-            mode="instant",
-            monitor=args.monitor,
-            error_message=str(e),
-        )
-        log.error("Capture failed: %s", e)
-        return 1
-
-
-def handle_region_capture(
-    args: argparse.Namespace,
-    config: Config,
-    options: OutputOptions,
-) -> int:
-    """Handle region capture."""
-    try:
-        parts = args.region.split(",")
-        x, y, w, h = int(parts[0]), int(parts[1]), int(parts[2]), int(parts[3])
-    except (ValueError, IndexError):
-        log.error("Invalid region format. Use X,Y,W,H (e.g., 100,100,800,600)")
-        return 1
-
-    operation_id = _start_operation("region", args.monitor)
-    try:
-        temp_path = region(x, y, w, h, config=config)
-        result = save(temp_path, options, config)
-        temp_path.unlink(missing_ok=True)
-        _complete_operation(
-            operation_id=operation_id,
-            mode="region",
-            monitor=args.monitor,
-            result=result,
-        )
-        return 0
-    except CaptureError as e:
-        emit("error.handled", {"error_type": "CaptureError", "message": str(e), "mode": "region"})
-        _complete_operation(
-            operation_id=operation_id,
-            mode="region",
-            monitor=args.monitor,
-            error_message=str(e),
-        )
-        log.error("Capture failed: %s", e)
-        return 1
-
-
-def handle_window_capture(
-    args: argparse.Namespace,
-    config: Config,
-    options: OutputOptions,
-) -> int:
-    """Handle window capture."""
-    operation_id = _start_operation("window", args.monitor)
-    try:
-        temp_path = window(args.window, config=config)
-        result = save(temp_path, options, config)
-        temp_path.unlink(missing_ok=True)
-        _complete_operation(
-            operation_id=operation_id,
-            mode="window",
-            monitor=args.monitor,
-            result=result,
-        )
-        return 0
-    except CaptureError as e:
-        emit("error.handled", {"error_type": "CaptureError", "message": str(e), "mode": "window"})
-        _complete_operation(
-            operation_id=operation_id,
-            mode="window",
-            monitor=args.monitor,
-            error_message=str(e),
-        )
-        log.error("Capture failed: %s", e)
-        return 1
-
-
-def handle_interactive(config: Config, instance_mgr: InstanceManager) -> int:
-    """Handle interactive mode."""
-    # Check if already running
-    if not instance_mgr.acquire_lock():
-        # Already running - signal it to take fullscreen screenshot
-        log.debug("Already running, sending signal")
-        if instance_mgr.signal_fullscreen():
-            return 0
-        else:
-            log.error("Failed to signal running instance")
-            return 1
-
-    try:
-        # Import here to avoid GTK initialization for non-interactive modes
-        from .ui import run_interactive
-        return run_interactive(config)
-    finally:
-        instance_mgr.release_lock()
-
-
-def main(args: Optional[list[str]] = None) -> int:
-    """Main entry point.
-
-    Args:
-        args: Command-line arguments (defaults to sys.argv[1:])
-
-    Returns:
-        Exit code
-    """
-    # STEP 1: Parse arguments first
-    parser = create_argument_parser()
-    parsed_args = parser.parse_args(args)
-
-    # Introspection flags short-circuit normal execution
-    result = _handle_introspection(parsed_args)
-    if result is not None:
-        return result
-
-    # Configure event emitter and register shutdown
-    # Suppress stderr events in silent mode (scripting/MCP captures stderr)
-    configure("screenshot-tool", stderr=not parsed_args.silent)
-    atexit.register(lambda: emit("shutdown", {}))
-
-    # Run hooks lifecycle startup (e.g., event transport injection)
-    try:
-        from screenshot_tool_hooks import run_lifecycle, shutdown_lifecycle
-        run_lifecycle("startup", {})
-        atexit.register(shutdown_lifecycle)
-    except (ImportError, Exception):
-        pass
-
-    config_path = Path(parsed_args.config).expanduser() if parsed_args.config else None
-    config = load_config(config_path=config_path)
-
-    resolved_path = config_path or "default"
-    source = "cli" if config_path else "default"
-    emit("config.resolved", {"config_path": str(resolved_path), "source": source})
-
-    instance_mgr = InstanceManager(config)
-
-    # Setup logging
-    logging.basicConfig(
-        level=logging.DEBUG if parsed_args.debug else logging.INFO,
-        format="%(levelname)s: %(message)s",
+def _proxy() -> Gio.DBusProxy:
+    return Gio.DBusProxy.new_for_bus_sync(
+        Gio.BusType.SESSION,
+        Gio.DBusProxyFlags.NONE,
+        None,
+        BUS_NAME,
+        OBJECT_PATH,
+        INTERFACE,
+        None,
     )
 
-    # Handle delay
-    if parsed_args.delay:
-        time.sleep(parsed_args.delay / 1000.0)
 
-    # Build output options
-    options = build_output_options(parsed_args)
+def _state(proxy: Gio.DBusProxy) -> dict[str, Any]:
+    return proxy.call_sync(
+        "GetState", None, Gio.DBusCallFlags.NONE, 5000, None
+    ).unpack()[0]
 
-    # STEP 3: Route to appropriate mode
-    if parsed_args.region:
-        return handle_region_capture(parsed_args, config, options)
 
-    if parsed_args.window:
-        return handle_window_capture(parsed_args, config, options)
+def _request_values(args, request_id: str | None = None) -> dict[str, GLib.Variant]:
+    mode = (
+        "fullscreen"
+        if args.instant
+        else "region"
+        if args.region
+        else "window"
+        if args.window
+        else "interactive"
+    )
+    values: dict[str, Any] = {
+        "mode": mode,
+        "delay_ms": max(0, args.delay),
+        "silent": args.silent,
+    }
+    if request_id:
+        values["request_id"] = request_id
+    for key, value in {
+        "region": args.region,
+        "window": args.window,
+        "monitor": args.monitor,
+        "output": args.output,
+        "format": args.format,
+        "quality": args.quality,
+        "config_path": args.config,
+    }.items():
+        if value is not None:
+            values[key] = value
+    if args.no_clipboard:
+        values["clipboard"] = False
+    if args.no_notification:
+        values["notification"] = False
+    if args.no_sound:
+        values["sound"] = False
+    variants = {}
+    for key, value in values.items():
+        if isinstance(value, bool):
+            variants[key] = GLib.Variant("b", value)
+        elif isinstance(value, int):
+            variants[key] = GLib.Variant("x", value)
+        else:
+            variants[key] = GLib.Variant("s", str(value))
+    return variants
 
-    if parsed_args.instant:
-        return handle_instant_capture(parsed_args, config, options)
 
-    # Default: interactive mode
-    # Hide cursor before starting interactive mode
-    hide_cursor()
+def _capture(proxy: Gio.DBusProxy, args) -> int:
+    wait = bool(
+        args.instant
+        or args.region
+        or args.window
+        or args.stdout
+        or args.json
+        or args.output
+    )
+    loop = GLib.MainLoop() if wait else None
+    outcome: dict[str, Any] = {"request_id": str(uuid.uuid4())}
+
+    def signal(_proxy, _sender, name, parameters):
+        values = parameters.unpack()
+        if values[0] != outcome["request_id"]:
+            return
+        if name == "Completed":
+            outcome["result"] = values[1]
+        elif name == "Failed":
+            outcome["error"] = f"{values[1]}: {values[2]}"
+        if loop:
+            loop.quit()
+
+    proxy.connect("g-signal", signal)
+    reply = proxy.call_sync(
+        "Request",
+        GLib.Variant("(a{sv})", (_request_values(args, outcome["request_id"]),)),
+        Gio.DBusCallFlags.NONE,
+        5000,
+        None,
+    )
+    if reply.unpack()[0] != outcome["request_id"]:
+        print(
+            "Screenshot service returned a mismatched request identifier",
+            file=sys.stderr,
+        )
+        return 1
+    if not wait:
+        return 0
+    GLib.timeout_add_seconds(
+        60,
+        lambda: (
+            outcome.setdefault("error", "Timed out waiting for screenshot"),
+            loop.quit(),
+            GLib.SOURCE_REMOVE,
+        )[2],
+    )
+    loop.run()
+    if "error" in outcome:
+        print(outcome["error"], file=sys.stderr)
+        return 1
+    result = outcome["result"]
+    if args.json:
+        print(json.dumps(result, sort_keys=True))
+    elif args.stdout or args.output or args.silent:
+        print(result["path"])
+    return 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = create_argument_parser().parse_args(argv)
+    result = _introspection(args)
+    if result is not None:
+        return result
     try:
-        return handle_interactive(config, instance_mgr)
-    finally:
-        show_cursor()
+        proxy = _proxy()
+        if args.status:
+            _print(_state(proxy))
+            return 0
+        return _capture(proxy, args)
+    except GLib.Error as exc:
+        print(f"Screenshot service unavailable: {exc.message}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    raise SystemExit(main())

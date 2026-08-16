@@ -1,0 +1,43 @@
+actions:
+  - id: screenshot.capture
+    title: Screenshot
+    description: Open the persistent screenshot selector; pressing again captures its frozen frame fullscreen.
+    group: screenshots
+    owner: screenshot-tool
+    safety: safe
+    runner:
+      type: command
+      command: screenshot
+    bindings:
+      global:
+        - KEY_SYSRQ
+      leader:
+        - s c
+
+  - id: screenshot.interactive
+    title: Interactive Screenshot
+    description: Open the screenshot tool in interactive capture mode.
+    group: screenshots
+    owner: screenshot-tool
+    safety: safe
+    runner:
+      type: command
+      command: screenshot
+    bindings:
+      global:
+        - <shift> KEY_SYSRQ
+      leader:
+        - s r
+
+  - id: screenshot.fullscreen_silent
+    title: Silent Fullscreen Screenshot
+    description: Capture the full screen without clipboard, notification, or sound.
+    group: screenshots
+    owner: screenshot-tool
+    safety: safe
+    runner:
+      type: command
+      command: screenshot --instant --silent
+    bindings:
+      leader:
+        - s f

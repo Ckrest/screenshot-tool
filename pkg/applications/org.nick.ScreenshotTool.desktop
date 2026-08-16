@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Screenshot Tool
+Comment=Capture a screenshot
+Icon=camera-photo
+Exec=screenshot
+Terminal=false
+Categories=Graphics;
+DBusActivatable=false
+StartupNotify=false

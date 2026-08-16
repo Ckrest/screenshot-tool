@@ -1,415 +1,336 @@
-"""Main screenshot overlay window."""
+"""GTK4 frozen-frame selector spanning every captured output."""
 
-import logging
-import os
-import signal
-import tempfile
-import uuid
-from pathlib import Path
-from typing import Optional
+from __future__ import annotations
 
-import cairo
+from collections.abc import Callable
+
 import gi
-gi.require_version("Gtk", "3.0")
-gi.require_version("Gdk", "3.0")
-gi.require_version("GtkLayerShell", "0.1")
+
+gi.require_version("Gdk", "4.0")
 gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import Gtk, Gdk, GdkPixbuf, GLib, GtkLayerShell
+gi.require_version("Gtk", "4.0")
+gi.require_version("Gtk4LayerShell", "1.0")
+from gi.repository import Gdk, GdkPixbuf, GLib, Gtk, Gtk4LayerShell
 
-from ..config import Config, get_config
-from ..capture import fullscreen as capture_fullscreen, window as capture_window
-from ..emit import emit
-from ..output import OutputOptions, save, save_pixbuf
-from ..wayfire import (
-    get_cursor_position,
-    get_window_geometries,
-    hide_cursor,
-    show_cursor,
-    focus_screenshot_tool,
-)
-from .drawing import (
-    draw_crosshair,
-    draw_dimension_text,
-    draw_instructions,
-    draw_selection_overlay,
-    draw_window_highlight,
-)
-from .magnifier import Magnifier
+from ..models import CoordinateMapper, OutputLayout, RawFrame, Rect, SelectionModel
+from ..wayfire import get_cursor_position
+from ..window import Window
+from .drawing import OverlayDrawing
 
-log = logging.getLogger(__name__)
-
-# Global instance for signal handler
-_overlay_instance: Optional["ScreenshotOverlay"] = None
+INSTRUCTION_DISMISS_DISTANCE = 72
 
 
-def _operation_type() -> str:
-    return "screenshot.capture"
+def point_near_rectangle(
+    x: float,
+    y: float,
+    left: float,
+    top: float,
+    width: float,
+    height: float,
+    distance: float = INSTRUCTION_DISMISS_DISTANCE,
+) -> bool:
+    return (
+        left - distance <= x <= left + width + distance
+        and top - distance <= y <= top + height + distance
+    )
 
 
-def _start_operation(mode: str) -> str:
-    operation_id = str(uuid.uuid4())
-    emit("operation.started", {
-        "operation_type": _operation_type(),
-        "operation_id": operation_id,
-        "mode": mode,
-        "monitor": None,
-    })
-    return operation_id
+class _OverlayView:
+    """One output-local surface into the shared frozen-frame model."""
 
-
-def _complete_operation(
-    operation_id: str,
-    mode: str,
-    output_path: Optional[str] = None,
-    error_message: Optional[str] = None,
-) -> None:
-    payload = {
-        "operation_type": _operation_type(),
-        "operation_id": operation_id,
-        "mode": mode,
-        "monitor": None,
-    }
-    if output_path is None:
-        payload["success"] = False
-        payload["error_message"] = error_message or "operation failed"
-    else:
-        payload["outputs"] = [{"file_path": output_path, "file_type": "screenshot"}]
-    emit("operation.completed", payload)
-
-
-def _glib_signal_handler():
-    """Handle SIGUSR1 via GLib for GTK compatibility."""
-    global _overlay_instance
-    if _overlay_instance:
-        GLib.idle_add(_overlay_instance.take_fullscreen_now)
-    return True  # Keep handler active
-
-
-class ScreenshotOverlay(Gtk.Window):
-    """Full-screen overlay for interactive screenshot capture."""
-
-    def __init__(self, config: Optional[Config] = None):
-        super().__init__(title="Screenshot Tool")
-        self.config = config or get_config()
-
-        # Store global instance for signal handling
-        global _overlay_instance
-        _overlay_instance = self
-
-        # Setup as layer-shell overlay (must be done BEFORE window is realized)
-        GtkLayerShell.init_for_window(self)
-        GtkLayerShell.set_layer(self, GtkLayerShell.Layer.OVERLAY)
-        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.TOP, True)
-        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.BOTTOM, True)
-        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.LEFT, True)
-        GtkLayerShell.set_anchor(self, GtkLayerShell.Edge.RIGHT, True)
-        GtkLayerShell.set_exclusive_zone(self, -1)  # Cover entire screen
-        GtkLayerShell.set_keyboard_mode(self, GtkLayerShell.KeyboardMode.EXCLUSIVE)
-
-        # Get window geometries BEFORE capturing (for window selection)
-        self.windows = get_window_geometries()
-        log.debug("Got %d windows", len(self.windows))
-
-        # Capture the current screen BEFORE showing window
-        self._temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        self._temp_file.close()
-        try:
-            temp_path = capture_fullscreen(config=self.config)
-            # Move to our temp file location
-            temp_path.rename(self._temp_file.name)
-        except Exception as e:
-            log.error("Failed to capture screen: %s", e)
-            raise
-
-        # Load the screenshot
-        self.screenshot = GdkPixbuf.Pixbuf.new_from_file(self._temp_file.name)
-        self.img_width = self.screenshot.get_width()
-        self.img_height = self.screenshot.get_height()
-        log.debug("Screenshot loaded: %dx%d", self.img_width, self.img_height)
-
-        # Window setup
-        self.set_decorated(False)
-        self.set_skip_taskbar_hint(True)
-        self.set_skip_pager_hint(True)
-
-        # Drawing area
-        self.drawing_area = Gtk.DrawingArea()
-        self.drawing_area.connect("draw", self._on_draw)
-        self.add(self.drawing_area)
-
-        # Selection state
-        self.selecting = False
-        self.start_x: Optional[float] = None
-        self.start_y: Optional[float] = None
-        self.end_x: Optional[float] = None
-        self.end_y: Optional[float] = None
-        self.hovered_window: Optional[dict] = None
-
-        # Get initial cursor position
-        cursor_pos = get_cursor_position()
-        if cursor_pos and 0 <= cursor_pos[0] < self.img_width and 0 <= cursor_pos[1] < self.img_height:
-            self.current_x = float(cursor_pos[0])
-            self.current_y = float(cursor_pos[1])
-        else:
-            self.current_x = float(self.img_width // 2)
-            self.current_y = float(self.img_height // 2)
-
-        # Mouse events
-        self.drawing_area.set_events(
-            Gdk.EventMask.BUTTON_PRESS_MASK
-            | Gdk.EventMask.BUTTON_RELEASE_MASK
-            | Gdk.EventMask.POINTER_MOTION_MASK
-            | Gdk.EventMask.KEY_PRESS_MASK
+    def __init__(
+        self,
+        owner: ScreenshotOverlay,
+        application: Gtk.Application,
+        output: OutputLayout,
+        primary: bool,
+    ) -> None:
+        self.owner = owner
+        self.output = output
+        self.mapper = CoordinateMapper(
+            owner.frame.width, owner.frame.height, output.frame_rect
+        )
+        viewport = owner.frame.crop(output.frame_rect)
+        byte_data = GLib.Bytes.new(viewport.pixels)
+        texture = Gdk.MemoryTexture.new(
+            viewport.width,
+            viewport.height,
+            Gdk.MemoryFormat.R8G8B8A8,
+            byte_data,
+            viewport.stride,
         )
 
-        self.drawing_area.connect("button-press-event", self._on_button_press)
-        self.drawing_area.connect("button-release-event", self._on_button_release)
-        self.drawing_area.connect("motion-notify-event", self._on_motion)
-        self.connect("key-press-event", self._on_key_press)
-
-        # Make widget focusable
-        self.drawing_area.set_can_focus(True)
-        self.drawing_area.grab_focus()
-
-        # Magnifier
-        self.magnifier = Magnifier()
-
-        self.show_all()
-
-        # Hide the cursor after window is shown
-        GLib.idle_add(self._hide_cursor_and_redraw)
-
-    def _hide_cursor_and_redraw(self):
-        """Hide the system cursor over the window."""
-        window = self.get_window()
-        if window:
-            display = window.get_display()
-            blank_cursor = Gdk.Cursor.new_for_display(display, Gdk.CursorType.BLANK_CURSOR)
-            window.set_cursor(blank_cursor)
-        self.drawing_area.queue_draw()
-        return False
-
-    def _find_window_at(self, x: float, y: float) -> Optional[dict]:
-        """Find the topmost window containing the given coordinates."""
-        for window in self.windows:
-            wx = window.get("x", 0)
-            wy = window.get("y", 0)
-            ww = window.get("width", 0)
-            wh = window.get("height", 0)
-            if wx <= x < wx + ww and wy <= y < wy + wh:
-                return window
-        return None
-
-    def _on_draw(self, widget, cr):
-        # Draw the frozen screenshot
-        Gdk.cairo_set_source_pixbuf(cr, self.screenshot, 0, 0)
-        cr.get_source().set_filter(cairo.FILTER_NEAREST)
-        cr.paint()
-
-        # Highlight hovered window if not dragging
-        if not self.selecting and self.hovered_window:
-            draw_window_highlight(cr, self.hovered_window, self.windows, self.screenshot)
-
-        # Draw selection rectangle if dragging
-        if self.selecting and self.start_x is not None:
-            x = int(min(self.start_x, self.current_x))
-            y = int(min(self.start_y, self.current_y))
-            w = int(abs(self.current_x - self.start_x))
-            h = int(abs(self.current_y - self.start_y))
-
-            draw_selection_overlay(cr, x, y, w, h, self.img_width, self.img_height)
-            draw_dimension_text(cr, x, y, w, h)
-
-        # Draw magnifier and crosshair
-        self.magnifier.draw(
-            cr, self.current_x, self.current_y,
-            self.screenshot, self.img_width, self.img_height
+        self.window = Gtk.ApplicationWindow(application=application)
+        self.window.set_title("Screenshot Tool")
+        self.window.set_decorated(False)
+        Gtk4LayerShell.init_for_window(self.window)
+        Gtk4LayerShell.set_namespace(self.window, "screenshot-tool")
+        Gtk4LayerShell.set_layer(self.window, Gtk4LayerShell.Layer.OVERLAY)
+        Gtk4LayerShell.set_keyboard_mode(
+            self.window,
+            Gtk4LayerShell.KeyboardMode.EXCLUSIVE
+            if primary
+            else Gtk4LayerShell.KeyboardMode.NONE,
         )
-        draw_crosshair(cr, self.current_x, self.current_y)
-
-        # Draw instructions
-        draw_instructions(cr)
-
-        return False
-
-    def _on_button_press(self, widget, event):
-        if event.button == 3:  # Right-click cancels
-            self._cleanup_and_exit()
-            return True
-
-        if event.button == 1:  # Left-click starts selection
-            self.selecting = True
-            self.start_x = self.current_x
-            self.start_y = self.current_y
-            widget.queue_draw()
-        return True
-
-    def _on_button_release(self, widget, event):
-        if event.button != 1:
-            return True
-
-        self.selecting = False
-        self.end_x = self.current_x
-        self.end_y = self.current_y
-
-        drag_threshold = 5
-        if (
-            abs(self.end_x - self.start_x) < drag_threshold
-            and abs(self.end_y - self.start_y) < drag_threshold
+        Gtk4LayerShell.set_exclusive_zone(self.window, -1)
+        for edge in (
+            Gtk4LayerShell.Edge.TOP,
+            Gtk4LayerShell.Edge.BOTTOM,
+            Gtk4LayerShell.Edge.LEFT,
+            Gtk4LayerShell.Edge.RIGHT,
         ):
-            # Click - check if on a window
-            if self.hovered_window:
-                self._take_window_screenshot(self.hovered_window)
-            else:
-                # No window, take full screen
-                self._take_screenshot(0, 0, self.img_width, self.img_height)
-        else:
-            # Drag selection
-            x = int(min(self.start_x, self.end_x))
-            y = int(min(self.start_y, self.end_y))
-            w = int(abs(self.end_x - self.start_x))
-            h = int(abs(self.end_y - self.start_y))
-            if w > 0 and h > 0:
-                self._take_screenshot(x, y, w, h)
+            Gtk4LayerShell.set_anchor(self.window, edge, True)
+        self._select_monitor(output.name)
+        if hasattr(self.window, "set_cursor_from_name"):
+            self.window.set_cursor_from_name("none")
 
-        return True
+        overlay = Gtk.Overlay()
+        picture = Gtk.Picture.new_for_paintable(texture)
+        picture.set_can_shrink(True)
+        picture.set_content_fit(Gtk.ContentFit.FILL)
+        overlay.set_child(picture)
+        self.canvas = Gtk.DrawingArea()
+        self.canvas.set_hexpand(True)
+        self.canvas.set_vexpand(True)
+        self.drawing = OverlayDrawing(
+            owner.model, self.mapper, owner.pixbuf, owner.windows
+        )
+        self.canvas.set_draw_func(self.drawing.draw)
+        overlay.add_overlay(self.canvas)
+        self.instructions: Gtk.Label | None = None
+        if primary:
+            instructions = Gtk.Label(
+                label=(
+                    "Drag a region  •  Click a window  •  "
+                    "Space: fullscreen  •  Esc: cancel"
+                )
+            )
+            instructions.set_halign(Gtk.Align.CENTER)
+            instructions.set_valign(Gtk.Align.START)
+            instructions.set_margin_top(28)
+            # The canvas owns all pointer interaction. Keep this visual hint out
+            # of GTK's pick path so motion and clicks continue underneath it.
+            instructions.set_can_target(False)
+            instructions.add_css_class("screenshot-instructions")
+            overlay.add_overlay(instructions)
+            self.instructions = instructions
+        self.window.set_child(overlay)
+        self._install_controllers()
 
-    def _on_motion(self, widget, event):
-        self.current_x = event.x
-        self.current_y = event.y
-
-        if not self.selecting:
-            self.hovered_window = self._find_window_at(self.current_x, self.current_y)
-
-        widget.queue_draw()
-        return True
-
-    def _on_key_press(self, widget, event):
-        # Arrow keys for fine adjustment
-        moved = False
-        if event.keyval == Gdk.KEY_Left:
-            self.current_x = max(0, self.current_x - 1)
-            moved = True
-        elif event.keyval == Gdk.KEY_Right:
-            self.current_x = min(self.img_width, self.current_x + 1)
-            moved = True
-        elif event.keyval == Gdk.KEY_Up:
-            self.current_y = max(0, self.current_y - 1)
-            moved = True
-        elif event.keyval == Gdk.KEY_Down:
-            self.current_y = min(self.img_height, self.current_y + 1)
-            moved = True
-
-        if moved:
-            if not self.selecting:
-                self.hovered_window = self._find_window_at(self.current_x, self.current_y)
-            widget.queue_draw()
-            return True
-
-        # Cancel
-        if event.keyval == Gdk.KEY_Escape:
-            self._cleanup_and_exit()
-            return True
-
-        # Full screen capture (PrintScreen, Space, SysReq)
-        KEY_SYSRQ = 65301
-        if event.keyval in (Gdk.KEY_Print, Gdk.KEY_space, KEY_SYSRQ):
-            self._take_screenshot(0, 0, self.img_width, self.img_height)
-            return True
-
-        # Confirm selection with Enter
-        if event.keyval == Gdk.KEY_Return and self.selecting:
-            x = int(min(self.start_x, self.current_x))
-            y = int(min(self.start_y, self.current_y))
-            w = int(abs(self.current_x - self.start_x))
-            h = int(abs(self.current_y - self.start_y))
-            if w > 0 and h > 0:
-                self._take_screenshot(x, y, w, h)
-            return True
-
-        return True
-
-    def take_fullscreen_now(self):
-        """Take full screen screenshot immediately (for signal handler)."""
-        self._take_screenshot(0, 0, self.img_width, self.img_height)
-
-    def _take_window_screenshot(self, window: dict):
-        """Capture a specific window."""
-        operation_id = _start_operation("window")
-        try:
-            app_id = window.get("app_id", "")
-            if not app_id:
-                log.error("Window has no app_id")
-                _complete_operation(operation_id, "window", error_message="window has no app_id")
+    def _select_monitor(self, connector: str) -> None:
+        monitors = self.window.get_display().get_monitors()
+        for index in range(monitors.get_n_items()):
+            monitor = monitors.get_item(index)
+            if monitor.get_connector() == connector:
+                Gtk4LayerShell.set_monitor(self.window, monitor)
                 return
 
-            temp_path = capture_window(app_id, config=self.config)
-            result = save(temp_path, OutputOptions(), self.config)
-            temp_path.unlink(missing_ok=True)
-            _complete_operation(operation_id, "window", output_path=str(result.path))
-        except Exception as e:
-            emit("error.handled", {"error_type": "CaptureError", "message": str(e), "mode": "window"})
-            _complete_operation(operation_id, "window", error_message=str(e))
-            log.error("Error capturing window: %s", e)
-        finally:
-            self._cleanup_and_exit()
+    def _install_controllers(self) -> None:
+        motion = Gtk.EventControllerMotion()
+        motion.connect("motion", self.owner._motion, self)
+        self.canvas.add_controller(motion)
+        primary = Gtk.GestureClick(button=1)
+        primary.connect("pressed", self.owner._pressed, self)
+        primary.connect("released", self.owner._released, self)
+        self.canvas.add_controller(primary)
+        secondary = Gtk.GestureClick(button=3)
+        secondary.connect("pressed", lambda *_args: self.owner.cancel())
+        self.canvas.add_controller(secondary)
+        keys = Gtk.EventControllerKey()
+        keys.connect("key-pressed", self.owner._key_pressed)
+        self.window.add_controller(keys)
 
-    def _take_screenshot(self, x: int, y: int, w: int, h: int):
-        """Capture a region of the frozen screenshot."""
-        mode = "instant" if (x, y, w, h) == (0, 0, self.img_width, self.img_height) else "region"
-        operation_id = _start_operation(mode)
-        try:
-            cropped = self.screenshot.new_subpixbuf(x, y, w, h)
-            result = save_pixbuf(cropped, OutputOptions(), self.config)
-            _complete_operation(operation_id, mode, output_path=str(result.path))
-        except Exception as e:
-            emit("error.handled", {"error_type": "CaptureError", "message": str(e), "mode": mode})
-            _complete_operation(operation_id, mode, error_message=str(e))
-            log.error("Error saving screenshot: %s", e)
-        finally:
-            self._cleanup_and_exit()
+    def present(self) -> None:
+        self.window.present()
 
-    def _cleanup_and_exit(self):
-        """Clean up and close the overlay."""
-        global _overlay_instance
-        _overlay_instance = None
+    def queue_draw(self) -> None:
+        self.canvas.queue_draw()
 
-        try:
-            os.unlink(self._temp_file.name)
-        except OSError:
-            pass
+    def hide_instructions(self) -> None:
+        if self.instructions is not None:
+            self.instructions.set_visible(False)
 
-        self.hide()
-        self.destroy()
-        Gtk.main_quit()
+    def pointer_near_instructions(self, x: float, y: float) -> bool:
+        if self.instructions is None or not self.instructions.get_visible():
+            return False
+        allocation = self.instructions.get_allocation()
+        return point_near_rectangle(
+            x,
+            y,
+            allocation.x,
+            allocation.y,
+            allocation.width,
+            allocation.height,
+        )
+
+    def destroy(self) -> None:
+        self.window.set_visible(False)
+        self.window.destroy()
 
 
-def run_interactive(config: Optional[Config] = None) -> int:
-    """Run the interactive screenshot overlay.
+class ScreenshotOverlay:
+    def __init__(
+        self,
+        application: Gtk.Application,
+        frame: RawFrame,
+        windows: list[Window],
+        on_region: Callable[[Rect], None],
+        on_window: Callable[[Window], None],
+        on_fullscreen: Callable[[], None],
+        on_cancel: Callable[[], None],
+        monitor: str | None = None,
+    ) -> None:
+        self.frame = frame
+        self.windows = windows
+        self.on_region, self.on_window = on_region, on_window
+        self.on_fullscreen, self.on_cancel = on_fullscreen, on_cancel
+        self._finished = False
+        cursor = get_cursor_position()
+        initial = (
+            frame.logical_point_to_frame(*cursor)
+            if cursor is not None
+            else (frame.width // 2, frame.height // 2)
+        )
+        self.model = SelectionModel(frame.width, frame.height, initial)
+        byte_data = GLib.Bytes.new(frame.pixels)
+        self.pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(
+            byte_data,
+            GdkPixbuf.Colorspace.RGB,
+            True,
+            8,
+            frame.width,
+            frame.height,
+            frame.stride,
+        )
+        layouts = list(frame.outputs)
+        if monitor:
+            layouts = [item for item in layouts if item.name == monitor]
+        if not layouts:
+            layouts = [
+                OutputLayout(
+                    name=monitor or frame.output_name or "",
+                    logical_x=frame.logical_origin[0],
+                    logical_y=frame.logical_origin[1],
+                    logical_width=frame.width,
+                    logical_height=frame.height,
+                    buffer_width=frame.width,
+                    buffer_height=frame.height,
+                    scale=1.0,
+                    transform="normal",
+                    frame_x=0,
+                    frame_y=0,
+                    frame_width=frame.width,
+                    frame_height=frame.height,
+                )
+            ]
+        self._install_css()
+        self._instructions_visible = True
+        self.views = [
+            _OverlayView(self, application, output, index == 0)
+            for index, output in enumerate(layouts)
+        ]
 
-    Args:
-        config: Configuration object
+    @staticmethod
+    def _install_css() -> None:
+        provider = Gtk.CssProvider()
+        provider.load_from_data(
+            b".screenshot-instructions { background: rgba(15,18,24,.9); color: white; padding: 10px 16px; border-radius: 8px; font-weight: 600; }"
+        )
+        Gtk.StyleContext.add_provider_for_display(
+            Gdk.Display.get_default(),
+            provider,
+            Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION,
+        )
 
-    Returns:
-        Exit code (0 for success)
-    """
-    config = config or get_config()
+    def show(self) -> None:
+        for view in self.views:
+            view.present()
 
-    # Set app_id for Wayland (must be done before GTK init)
-    os.environ["GDK_BACKEND"] = "wayland"
-    GLib.set_prgname("screenshot-tool")
-    GLib.set_application_name("Screenshot Tool")
+    def _queue_draw(self) -> None:
+        for view in self.views:
+            view.queue_draw()
 
-    # Set up signal handler for SIGUSR1 (fullscreen trigger from another invocation)
-    GLib.unix_signal_add(GLib.PRIORITY_HIGH, signal.SIGUSR1, _glib_signal_handler)
+    def _move_from_widget(self, view: _OverlayView, x: float, y: float) -> None:
+        self.model.move(
+            *view.mapper.widget_to_frame(
+                x, y, view.canvas.get_width(), view.canvas.get_height()
+            )
+        )
+        self._queue_draw()
 
-    # Hide cursor before showing overlay
-    hide_cursor()
+    def _motion(self, _controller, x: float, y: float, view: _OverlayView) -> None:
+        self._dismiss_instructions_near(view, x, y)
+        self._move_from_widget(view, x, y)
 
-    try:
-        ScreenshotOverlay(config)
-        Gtk.main()
-    finally:
-        show_cursor()
+    def _pressed(
+        self, _gesture, _count: int, x: float, y: float, view: _OverlayView
+    ) -> None:
+        self._dismiss_instructions_near(view, x, y)
+        self._move_from_widget(view, x, y)
+        self.model.begin()
 
-    return 0
+    def _dismiss_instructions_near(
+        self, view: _OverlayView, x: float, y: float
+    ) -> None:
+        if self._instructions_visible and view.pointer_near_instructions(x, y):
+            self._dismiss_instructions()
+
+    def _dismiss_instructions(self) -> None:
+        if not self._instructions_visible:
+            return
+        self._instructions_visible = False
+        for view in self.views:
+            view.hide_instructions()
+
+    def _released(
+        self, _gesture, _count: int, x: float, y: float, view: _OverlayView
+    ) -> None:
+        self._move_from_widget(view, x, y)
+        selection = self.model.selection
+        if selection and selection.width >= 4 and selection.height >= 4:
+            self._finish(lambda: self.on_region(selection))
+            return
+        self.model.clear()
+        target = view.drawing.hovered_window()
+        if target and target.capture_id:
+            self._finish(lambda: self.on_window(target))
+        else:
+            self._queue_draw()
+
+    def _key_pressed(self, _controller, keyval: int, _keycode: int, _state) -> bool:
+        if keyval == Gdk.KEY_Escape:
+            self.cancel()
+        elif keyval in {Gdk.KEY_space, Gdk.KEY_Print, Gdk.KEY_KP_Space}:
+            self.confirm_fullscreen()
+        elif keyval in {Gdk.KEY_Return, Gdk.KEY_KP_Enter}:
+            selection = self.model.selection
+            target = next(
+                (view.drawing.hovered_window() for view in self.views), None
+            )
+            if selection and selection.width and selection.height:
+                self._finish(lambda: self.on_region(selection))
+            elif target and target.capture_id:
+                self._finish(lambda: self.on_window(target))
+        elif keyval in {Gdk.KEY_Left, Gdk.KEY_Right, Gdk.KEY_Up, Gdk.KEY_Down}:
+            self.model.nudge(
+                -1 if keyval == Gdk.KEY_Left else 1 if keyval == Gdk.KEY_Right else 0,
+                -1 if keyval == Gdk.KEY_Up else 1 if keyval == Gdk.KEY_Down else 0,
+            )
+            self._queue_draw()
+        else:
+            return False
+        return True
+
+    def confirm_fullscreen(self) -> None:
+        self._finish(self.on_fullscreen)
+
+    def cancel(self) -> None:
+        self._finish(self.on_cancel)
+
+    def _finish(self, callback: Callable[[], None]) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        for view in self.views:
+            view.destroy()
+        callback()

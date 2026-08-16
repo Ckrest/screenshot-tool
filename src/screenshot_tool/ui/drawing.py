@@ -1,155 +1,189 @@
-"""Cairo drawing helpers for the screenshot overlay."""
+"""GTK4 selection overlay rendering."""
 
-import cairo
+from __future__ import annotations
 
+import math
 
-def draw_crosshair(cr: cairo.Context, x: float, y: float, size: int = 15):
-    """Draw a crosshair cursor at the given position."""
-    # Black outline
-    cr.set_source_rgb(0, 0, 0)
-    cr.set_line_width(3)
-    cr.move_to(x - size, y)
-    cr.line_to(x + size, y)
-    cr.move_to(x, y - size)
-    cr.line_to(x, y + size)
-    cr.stroke()
+import gi
 
-    # White center
-    cr.set_source_rgb(1, 1, 1)
-    cr.set_line_width(1)
-    cr.move_to(x - size, y)
-    cr.line_to(x + size, y)
-    cr.move_to(x, y - size)
-    cr.line_to(x, y + size)
-    cr.stroke()
+gi.require_version("Gdk", "4.0")
+from gi.repository import Gdk
+
+from ..models import CoordinateMapper, Rect, SelectionModel
+from ..window import Window, find_window_in_list
+
+MAGNIFIER_DIAMETER = 480
+MAGNIFIER_ZOOM = 8
+MAGNIFIER_GAP = 32
+MAGNIFIER_MARGIN = 12
 
 
-def draw_selection_overlay(
-    cr: cairo.Context,
-    x: int,
-    y: int,
+def magnifier_geometry(
+    cursor_x: float,
+    cursor_y: float,
     width: int,
     height: int,
-    img_width: int,
-    img_height: int,
-):
-    """Draw semi-transparent overlay outside the selection area."""
-    # Dark overlay outside selection
-    cr.set_source_rgba(0, 0, 0, 0.5)
-    cr.rectangle(0, 0, img_width, y)  # Top
-    cr.rectangle(0, y, x, height)  # Left
-    cr.rectangle(x + width, y, img_width - (x + width), height)  # Right
-    cr.rectangle(0, y + height, img_width, img_height - (y + height))  # Bottom
-    cr.fill()
-
-    # Selection border
-    cr.set_source_rgb(0.3, 0.6, 1.0)
-    cr.set_line_width(2)
-    cr.rectangle(x, y, width, height)
-    cr.stroke()
-
-
-def draw_dimension_text(cr: cairo.Context, x: int, y: int, width: int, height: int):
-    """Draw dimension text in the center of a selection."""
-    cr.select_font_face("monospace", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_BOLD)
-    cr.set_font_size(14)
-    dim_text = f"{width} x {height}"
-    extents = cr.text_extents(dim_text)
-
-    text_x = x + width / 2 - extents.width / 2
-    text_y = y + height / 2 + extents.height / 2
-
-    # Background
-    cr.set_source_rgba(0, 0, 0, 0.8)
-    cr.rectangle(
-        text_x - 5,
-        text_y - extents.height - 5,
-        extents.width + 10,
-        extents.height + 10,
+    diameter: int = MAGNIFIER_DIAMETER,
+) -> tuple[float, float, float]:
+    """Place the magnifier diagonally from the cursor within the canvas."""
+    size = max(
+        0,
+        min(
+            diameter,
+            width - 2 * MAGNIFIER_MARGIN,
+            height - 2 * MAGNIFIER_MARGIN,
+        ),
     )
-    cr.fill()
+    x = (
+        cursor_x + MAGNIFIER_GAP
+        if cursor_x + MAGNIFIER_GAP + size <= width - MAGNIFIER_MARGIN
+        else cursor_x - MAGNIFIER_GAP - size
+    )
+    y = (
+        cursor_y + MAGNIFIER_GAP
+        if cursor_y + MAGNIFIER_GAP + size <= height - MAGNIFIER_MARGIN
+        else cursor_y - MAGNIFIER_GAP - size
+    )
+    x = min(
+        max(MAGNIFIER_MARGIN, x),
+        max(MAGNIFIER_MARGIN, width - size - MAGNIFIER_MARGIN),
+    )
+    y = min(
+        max(MAGNIFIER_MARGIN, y),
+        max(MAGNIFIER_MARGIN, height - size - MAGNIFIER_MARGIN),
+    )
+    return x, y, float(size)
 
-    # Text
-    cr.set_source_rgb(1, 1, 1)
-    cr.move_to(text_x, text_y)
-    cr.show_text(dim_text)
 
+class OverlayDrawing:
+    def __init__(
+        self,
+        model: SelectionModel,
+        mapper: CoordinateMapper,
+        pixbuf,
+        windows: list[Window],
+    ) -> None:
+        self.model, self.mapper, self.pixbuf, self.windows = (
+            model,
+            mapper,
+            pixbuf,
+            windows,
+        )
 
-def draw_instructions(cr: cairo.Context, x: int = 20, y: int = 30):
-    """Draw help instructions in the corner."""
-    instructions = [
-        "Click window: Capture window",
-        "Drag: Select area",
-        "PrintScreen: Full screen",
-        "Arrow keys: Fine adjust",
-        "ESC/Right-click: Cancel",
-    ]
+    def hovered_window(self) -> Window | None:
+        return find_window_in_list(
+            self.windows, self.model.cursor_x, self.model.cursor_y
+        )
 
-    cr.select_font_face("sans-serif", cairo.FONT_SLANT_NORMAL, cairo.FONT_WEIGHT_NORMAL)
-    cr.set_font_size(14)
+    def draw(self, area, cr, width: int, height: int) -> None:
+        selection = self.model.selection
+        hovered = self.hovered_window() if selection is None else None
+        highlighted = selection or (
+            Rect(hovered.x, hovered.y, hovered.width, hovered.height)
+            if hovered
+            else None
+        )
 
-    for instruction in instructions:
-        extents = cr.text_extents(instruction)
-        # Background
-        cr.set_source_rgba(0, 0, 0, 0.7)
-        cr.rectangle(x - 5, y - extents.height - 2, extents.width + 10, extents.height + 6)
+        cr.set_source_rgba(0, 0, 0, 0.26)
+        cr.paint()
+        if highlighted:
+            x, y = self.mapper.frame_to_widget(
+                highlighted.x, highlighted.y, width, height
+            )
+            right, bottom = self.mapper.frame_to_widget(
+                highlighted.x + highlighted.width,
+                highlighted.y + highlighted.height,
+                width,
+                height,
+            )
+            cr.save()
+            cr.set_operator(1)  # SOURCE
+            cr.set_source_rgba(0, 0, 0, 0)
+            cr.rectangle(x, y, right - x, bottom - y)
+            cr.fill()
+            cr.restore()
+            cr.set_source_rgba(0.18, 0.68, 1.0, 0.95)
+            cr.set_line_width(2)
+            cr.rectangle(x + 1, y + 1, max(0, right - x - 2), max(0, bottom - y - 2))
+            cr.stroke()
+            self._dimensions(cr, highlighted, x, y, right, bottom, width, height)
+
+        if self.mapper.contains_frame(self.model.cursor_x, self.model.cursor_y):
+            cursor_x, cursor_y = self.mapper.frame_to_widget(
+                self.model.cursor_x,
+                self.model.cursor_y,
+                width,
+                height,
+            )
+            cr.set_source_rgba(1, 1, 1, 0.85)
+            cr.set_line_width(1)
+            cr.move_to(0, cursor_y + 0.5)
+            cr.line_to(width, cursor_y + 0.5)
+            cr.move_to(cursor_x + 0.5, 0)
+            cr.line_to(cursor_x + 0.5, height)
+            cr.stroke()
+            self._magnifier(cr, cursor_x, cursor_y, width, height)
+
+    def _dimensions(
+        self,
+        cr,
+        rect: Rect,
+        x: float,
+        y: float,
+        right: float,
+        bottom: float,
+        width: int,
+        height: int,
+    ) -> None:
+        text = f"{rect.width} × {rect.height}"
+        cr.select_font_face("Sans", 0, 1)
+        cr.set_font_size(13)
+        extents = cr.text_extents(text)
+        box_width = extents.width + 16
+        box_height = 26
+        box_x = min(max(8, x), max(8, width - box_width - 8))
+        box_y = (
+            bottom + 8
+            if bottom + box_height + 8 < height
+            else max(8, y - box_height - 8)
+        )
+        cr.set_source_rgba(0.06, 0.08, 0.11, 0.92)
+        cr.rectangle(box_x, box_y, box_width, box_height)
         cr.fill()
-        # Text
-        cr.set_source_rgb(1, 1, 1)
-        cr.move_to(x, y)
-        cr.show_text(instruction)
-        y += 22
+        cr.set_source_rgba(1, 1, 1, 1)
+        cr.move_to(box_x + 8, box_y + 18)
+        cr.show_text(text)
 
-
-def draw_window_highlight(
-    cr: cairo.Context,
-    window: dict,
-    all_windows: list[dict],
-    screenshot,
-):
-    """Draw highlight for hovered window, respecting z-order."""
-    import gi
-    gi.require_version("Gdk", "3.0")
-    from gi.repository import Gdk
-
-    win_z = window.get("z_order", 999)
-    wx, wy = window["x"], window["y"]
-    ww, wh = window["width"], window["height"]
-
-    # Collect front windows that overlap with hovered window
-    front_windows = []
-    for other_win in all_windows:
-        if other_win.get("z_order", 999) < win_z:
-            ox, oy = other_win["x"], other_win["y"]
-            ow, oh = other_win["width"], other_win["height"]
-            # Check overlap
-            if not (ox >= wx + ww or ox + ow <= wx or oy >= wy + wh or oy + oh <= wy):
-                front_windows.append(other_win)
-
-    # Draw highlight, then "erase" front windows by redrawing background
-    cr.save()
-    cr.rectangle(wx, wy, ww, wh)
-    cr.clip()
-
-    # Draw the highlight
-    cr.set_source_rgba(0.3, 0.6, 1.0, 0.3)
-    cr.paint()
-
-    # Paint screenshot back over front window areas (removes highlight there)
-    for other_win in front_windows:
-        ox, oy = other_win["x"], other_win["y"]
-        ow, oh = other_win["width"], other_win["height"]
+    def _magnifier(
+        self, cr, cursor_x: float, cursor_y: float, width: int, height: int
+    ) -> None:
+        x, y, size = magnifier_geometry(cursor_x, cursor_y, width, height)
+        if size < 4:
+            return
+        center_x, center_y = x + size / 2, y + size / 2
+        radius = size / 2
         cr.save()
-        cr.rectangle(ox, oy, ow, oh)
+        cr.arc(center_x, center_y, radius, 0, math.tau)
         cr.clip()
-        Gdk.cairo_set_source_pixbuf(cr, screenshot, 0, 0)
+        cr.translate(center_x, center_y)
+        cr.scale(MAGNIFIER_ZOOM, MAGNIFIER_ZOOM)
+        Gdk.cairo_set_source_pixbuf(
+            cr, self.pixbuf, -self.model.cursor_x, -self.model.cursor_y
+        )
+        cr.get_source().set_filter(3)  # NEAREST
         cr.paint()
         cr.restore()
-
-    cr.restore()
-
-    # Draw window border (full border, not clipped)
-    cr.set_source_rgb(0.3, 0.6, 1.0)
-    cr.set_line_width(3)
-    cr.rectangle(wx, wy, ww, wh)
-    cr.stroke()
+        cr.set_source_rgba(0.05, 0.07, 0.1, 0.95)
+        cr.set_line_width(5)
+        cr.arc(center_x, center_y, radius - 2.5, 0, math.tau)
+        cr.stroke()
+        cr.set_source_rgba(1, 1, 1, 0.9)
+        cr.set_line_width(1)
+        cr.arc(center_x, center_y, radius - 5.5, 0, math.tau)
+        cr.stroke()
+        crosshair_radius = radius - 7
+        cr.move_to(center_x, center_y - crosshair_radius)
+        cr.line_to(center_x, center_y + crosshair_radius)
+        cr.move_to(center_x - crosshair_radius, center_y)
+        cr.line_to(center_x + crosshair_radius, center_y)
+        cr.stroke()

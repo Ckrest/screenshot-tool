@@ -1,11 +1,3 @@
-"""Screenshot Tool for Wayland/Wayfire.
+"""Persistent Wayland screenshot service."""
 
-A screenshot utility with:
-- Interactive region/window selection
-- Magnifier for pixel-perfect positioning
-- Press-again fullscreen capture while the UI is open
-- CLI and hotkey interfaces
-"""
-
-__version__ = "2.0.0"
-__author__ = "Ckrest"
+__version__ = "3.0.0"

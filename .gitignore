@@ -1,7 +1,13 @@
 # ──────────────────────────────────────────────────────────────
 # Packaging artifacts
 # ──────────────────────────────────────────────────────────────
-pkg/
+pkg/*
+!pkg/wayfire-keybindings/
+!pkg/wayfire-keybindings/actions.yaml
+!pkg/applications/
+!pkg/applications/org.nick.ScreenshotTool.desktop
+!pkg/systemd/
+!pkg/systemd/screenshot-tool.service
 
 # ──────────────────────────────────────────────────────────────
 # Python
@@ -74,10 +80,3 @@ hooks.local/
 *.sqlite3
 *.pkl
 *.pt
-
-# ──────────────────────────────────────────────────────────────
-# Registry metadata (not published)
-# ──────────────────────────────────────────────────────────────
-manifest.yaml
-trait_*.yaml
-NOTES.md

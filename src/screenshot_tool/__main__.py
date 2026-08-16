@@ -1,8 +1,3 @@
-"""Allow running as: python -m screenshot_tool"""
+from .cli import main
 
-import sys
-
-from screenshot_tool.cli import main
-
-if __name__ == "__main__":
-    sys.exit(main())
+raise SystemExit(main())

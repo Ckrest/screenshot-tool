@@ -1,317 +1,165 @@
-"""Configuration management for Screenshot Tool.
+"""Configuration loaded afresh for every screenshot request."""
 
-Configuration priority (highest to lowest):
-1. CLI overrides (passed to load_config)
-2. Environment variables (SCREENSHOT_TOOL_*)
-3. Config file (platformdirs config dir / config.yaml)
-4. Built-in defaults
-"""
+from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field, fields
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
-from typing import Optional, Any
+from typing import Any
 
 import yaml
-from platformdirs import user_config_dir, user_data_dir, user_cache_dir
+from platformdirs import user_cache_dir, user_config_dir
 
 ENV_PREFIX = "SCREENSHOT_TOOL"
 CONFIG_DIR = Path(user_config_dir("screenshot-tool"))
 DEFAULT_CONFIG_PATH = CONFIG_DIR / "config.yaml"
+DEFAULT_FORMATS = {"png", "jpg", "jpeg", "webp"}
+
+
+def runtime_dir() -> Path:
+    root = Path(os.environ.get("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}"))
+    if not root.is_dir():
+        root = Path(user_cache_dir("screenshot-tool")) / "runtime"
+    return root / "screenshot-tool"
 
 
 @dataclass
 class Config:
-    """Screenshot tool configuration."""
-
-    # Binary paths
     wayland_capture: str = "wayland-capture"
-
-    # Output settings
-    data_dir: Path = field(default_factory=lambda: Path(user_data_dir("screenshot-tool")))
-    cache_dir: Path = field(default_factory=lambda: Path(user_cache_dir("screenshot-tool")))
-    output_dir: Path = field(default_factory=lambda: Path.home() / "Pictures" / "screenshots")
+    output_dir: Path = field(
+        default_factory=lambda: Path.home() / "Pictures" / "screenshots"
+    )
+    silent_output_dir: Path = field(default_factory=lambda: runtime_dir() / "captures")
+    hooks_dir: Path | None = field(default_factory=lambda: CONFIG_DIR / "hooks")
     default_format: str = "png"
     default_quality: int = 90
-
-    # Behavior
     enable_sound: bool = True
     enable_notification: bool = True
     enable_clipboard: bool = True
+    include_window_title: bool = False
 
-    # Paths
-    lock_file: Path = field(default_factory=lambda: Path("/tmp/screenshot-tool.lock"))
-
-    # Silent mode output (for scripting)
-    silent_output_dir: Path = field(default_factory=lambda: Path("/tmp"))
-
-    # Hooks
-    hooks_dir: Optional[Path] = field(default_factory=lambda: CONFIG_DIR / "hooks")
-
-    def __post_init__(self):
-        # Convert string paths to Path objects
-        if isinstance(self.data_dir, str):
-            self.data_dir = Path(self.data_dir)
-        if isinstance(self.cache_dir, str):
-            self.cache_dir = Path(self.cache_dir)
-        if isinstance(self.output_dir, str):
-            self.output_dir = Path(self.output_dir)
-        if isinstance(self.lock_file, str):
-            self.lock_file = Path(self.lock_file)
-        if isinstance(self.silent_output_dir, str):
-            self.silent_output_dir = Path(self.silent_output_dir)
-        if isinstance(self.hooks_dir, str):
-            self.hooks_dir = Path(self.hooks_dir)
+    def __post_init__(self) -> None:
+        for key in ("output_dir", "silent_output_dir", "hooks_dir"):
+            value = getattr(self, key)
+            if value is not None and not isinstance(value, Path):
+                setattr(self, key, Path(value).expanduser())
 
 
-DEFAULT_FORMATS = {"png", "jpg", "jpeg", "webp"}
-PATH_KEYS = {
-    "data_dir",
-    "cache_dir",
-    "output_dir",
-    "lock_file",
-    "silent_output_dir",
-    "hooks_dir",
-}
+def config_defaults() -> dict[str, Any]:
+    return _serialize(Config())
 
 
-def _env(name: str) -> Optional[str]:
-    return os.environ.get(f"{ENV_PREFIX}_{name}")
+def _serialize(config: Config) -> dict[str, Any]:
+    return {
+        key: str(value) if isinstance(value, Path) else value
+        for key, value in asdict(config).items()
+    }
 
 
-def _config_path_from_env() -> Optional[Path]:
-    value = _env("CONFIG") or _env("CONFIG_PATH")
-    if value:
-        return Path(value).expanduser()
-    return None
+def config_to_dict(config: Config) -> dict[str, Any]:
+    return _serialize(config)
 
 
-def _load_config_file(path: Path, strict: bool = False) -> dict:
+def resolve_config_path(config_path: Path | None = None) -> Path:
+    configured = os.environ.get(f"{ENV_PREFIX}_CONFIG") or os.environ.get(
+        f"{ENV_PREFIX}_CONFIG_PATH"
+    )
+    return config_path or (
+        Path(configured).expanduser() if configured else DEFAULT_CONFIG_PATH
+    )
+
+
+def _file_values(path: Path, strict: bool) -> dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        data = yaml.safe_load(path.read_text()) or {}
+        values = yaml.safe_load(path.read_text()) or {}
     except Exception as exc:
         if strict:
-            raise ValueError(f"Failed to parse config file {path}: {exc}")
+            raise ValueError(f"Failed to parse config file {path}: {exc}") from exc
         return {}
-
-    if not isinstance(data, dict):
+    if not isinstance(values, dict):
         if strict:
             raise ValueError(f"Config file {path} must be a mapping")
         return {}
-
-    return data
-
-
-def _expand_path(value: Any) -> Any:
-    if value is None:
-        return value
-    return str(Path(value).expanduser())
+    # Old runtime/native-helper keys are intentionally ignored during migration.
+    return values
 
 
-def config_defaults() -> dict:
-    return {
-        "wayland_capture": "wayland-capture",
-        "data_dir": str(Path(user_data_dir("screenshot-tool"))),
-        "cache_dir": str(Path(user_cache_dir("screenshot-tool"))),
-        "output_dir": str(Path.home() / "Pictures" / "screenshots"),
-        "default_format": "png",
-        "default_quality": 90,
-        "enable_sound": True,
-        "enable_notification": True,
-        "enable_clipboard": True,
-        "lock_file": "/tmp/screenshot-tool.lock",
-        "silent_output_dir": "/tmp",
-        "hooks_dir": str(CONFIG_DIR / "hooks"),
-    }
-
-
-def _load_env_overrides() -> dict:
-    config: dict[str, Any] = {}
-
-    mapping = {
-        "WAYLAND_CAPTURE": "wayland_capture",
-        "DATA_DIR": "data_dir",
-        "CACHE_DIR": "cache_dir",
-        "OUTPUT_DIR": "output_dir",
-        "DEFAULT_FORMAT": "default_format",
-        "DEFAULT_QUALITY": "default_quality",
-        "LOCK_FILE": "lock_file",
-        "SILENT_OUTPUT_DIR": "silent_output_dir",
-        "HOOKS_DIR": "hooks_dir",
-    }
-
-    for env_name, key in mapping.items():
-        value = _env(env_name)
-        if value is None:
+def _environment_values() -> dict[str, Any]:
+    values: dict[str, Any] = {}
+    valid = {item.name for item in fields(Config)}
+    for key in valid:
+        raw = os.environ.get(f"{ENV_PREFIX}_{key.upper()}")
+        if raw is None:
             continue
-        if key in {"output_dir", "lock_file", "silent_output_dir", "hooks_dir"}:
-            config[key] = _expand_path(value)
-        elif key in {"data_dir", "cache_dir"}:
-            config[key] = _expand_path(value)
+        if key.startswith("enable_") or key == "include_window_title":
+            values[key] = raw.lower() in {"1", "true", "yes", "on"}
         elif key == "default_quality":
             try:
-                config[key] = int(value)
+                values[key] = int(raw)
             except ValueError:
                 continue
         else:
-            config[key] = value
-
-    for env_name, key in [
-        ("ENABLE_SOUND", "enable_sound"),
-        ("ENABLE_NOTIFICATION", "enable_notification"),
-        ("ENABLE_CLIPBOARD", "enable_clipboard"),
-    ]:
-        value = _env(env_name)
-        if value is None:
-            continue
-        config[key] = value.lower() in ("true", "1", "yes", "on")
-
-    return config
-
-
-def resolve_config_path(config_path: Optional[Path] = None) -> Path:
-    return config_path or _config_path_from_env() or DEFAULT_CONFIG_PATH
+            values[key] = raw
+    return values
 
 
 def load_config(
-    config_path: Optional[Path] = None,
-    overrides: Optional[dict] = None,
+    config_path: Path | None = None,
+    overrides: dict[str, Any] | None = None,
     strict: bool = False,
 ) -> Config:
-    """Load configuration from all sources."""
-    resolved_path = resolve_config_path(config_path)
-
-    config_dict = config_defaults()
-    file_config = _load_config_file(resolved_path, strict=strict)
-    config_dict.update(file_config)
-    config_dict.update(_load_env_overrides())
-
-    if overrides:
-        for key, value in overrides.items():
-            if value is not None:
-                config_dict[key] = value
-
-    for key in PATH_KEYS:
-        if key in config_dict and config_dict[key] is not None:
-            config_dict[key] = _expand_path(config_dict[key])
-
-    # Filter out unknown keys to prevent TypeError on Config()
-    valid_keys = {f.name for f in fields(Config)}
-    config_dict = {k: v for k, v in config_dict.items() if k in valid_keys}
-
-    return Config(**config_dict)
+    values = config_defaults()
+    values.update(_file_values(resolve_config_path(config_path), strict))
+    values.update(_environment_values())
+    values.update(
+        {key: value for key, value in (overrides or {}).items() if value is not None}
+    )
+    valid = {item.name for item in fields(Config)}
+    return Config(**{key: value for key, value in values.items() if key in valid})
 
 
-# Global config instance (lazy loaded)
-_config: Optional[Config] = None
-
-
-def get_config() -> Config:
-    """Get the global configuration instance."""
-    global _config
-    if _config is None:
-        _config = load_config()
-    return _config
-
-
-def config_schema() -> dict:
+def config_schema() -> dict[str, Any]:
     return {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
         "type": "object",
         "properties": {
             "wayland_capture": {"type": "string"},
-            "data_dir": {"type": "string"},
-            "cache_dir": {"type": "string"},
             "output_dir": {"type": "string"},
+            "silent_output_dir": {"type": "string"},
+            "hooks_dir": {"type": ["string", "null"]},
             "default_format": {"type": "string", "enum": sorted(DEFAULT_FORMATS)},
             "default_quality": {"type": "integer", "minimum": 1, "maximum": 100},
             "enable_sound": {"type": "boolean"},
             "enable_notification": {"type": "boolean"},
             "enable_clipboard": {"type": "boolean"},
-            "lock_file": {"type": "string"},
-            "silent_output_dir": {"type": "string"},
-            "hooks_dir": {"type": ["string", "null"]},
+            "include_window_title": {"type": "boolean"},
         },
         "additionalProperties": False,
     }
 
 
-def _is_int(value: Any) -> bool:
-    return isinstance(value, int) and not isinstance(value, bool)
-
-
-def validate_config_dict(data: Any) -> list[str]:
-    errors: list[str] = []
-    if not isinstance(data, dict):
-        return ["Config must be a mapping/object"]
-
-    schema = config_schema()
-    props = schema.get("properties", {})
-    allowed_keys = set(props.keys())
-
-    for key in data.keys():
-        if key not in allowed_keys:
-            errors.append(f"Unknown config key: {key}")
-
-    def check_type(key: str, value: Any, expected: str) -> None:
-        if expected == "string" and not isinstance(value, str):
-            errors.append(f"{key} must be a string")
-        elif expected == "integer" and not _is_int(value):
-            errors.append(f"{key} must be an integer")
-        elif expected == "boolean" and not isinstance(value, bool):
-            errors.append(f"{key} must be a boolean")
-
-    for key, value in data.items():
-        if key not in props:
-            continue
-        spec = props[key]
-        expected = spec.get("type")
-        if isinstance(expected, list):
-            if value is None and "null" in expected:
-                continue
-            if "string" in expected and isinstance(value, str):
-                continue
-            errors.append(f"{key} must be one of types: {', '.join(expected)}")
-            continue
-        if isinstance(expected, str):
-            check_type(key, value, expected)
-
-        if key == "default_format" and value not in DEFAULT_FORMATS:
-            errors.append(f"default_format must be one of: {', '.join(sorted(DEFAULT_FORMATS))}")
-        if key == "default_quality" and _is_int(value):
-            if value < 1 or value > 100:
-                errors.append("default_quality must be between 1 and 100")
-
-    return errors
-
-
-def validate_config_file(config_path: Optional[Path] = None) -> list[str]:
+def validate_config_file(config_path: Path | None = None) -> list[str]:
     path = resolve_config_path(config_path)
-    if not path.exists():
-        return []
-    data = _load_config_file(path, strict=True)
-    return validate_config_dict(data)
-
-
-def config_to_dict(config: Config) -> dict:
-    def _format(value: Any) -> Any:
-        if isinstance(value, Path):
-            return str(value)
-        return value
-
-    return {
-        "wayland_capture": config.wayland_capture,
-        "data_dir": _format(config.data_dir),
-        "cache_dir": _format(config.cache_dir),
-        "output_dir": _format(config.output_dir),
-        "default_format": config.default_format,
-        "default_quality": config.default_quality,
-        "enable_sound": config.enable_sound,
-        "enable_notification": config.enable_notification,
-        "enable_clipboard": config.enable_clipboard,
-        "lock_file": _format(config.lock_file),
-        "silent_output_dir": _format(config.silent_output_dir),
-        "hooks_dir": _format(config.hooks_dir) if config.hooks_dir else None,
-    }
+    try:
+        values = _file_values(path, True)
+    except ValueError as exc:
+        return [str(exc)]
+    properties = config_schema()["properties"]
+    errors = [
+        f"Unknown configuration key: {key}" for key in values if key not in properties
+    ]
+    fmt = values.get("default_format")
+    if fmt is not None and fmt not in DEFAULT_FORMATS:
+        errors.append(
+            f"default_format must be one of: {', '.join(sorted(DEFAULT_FORMATS))}"
+        )
+    quality = values.get("default_quality")
+    if quality is not None and (
+        isinstance(quality, bool)
+        or not isinstance(quality, int)
+        or not 1 <= quality <= 100
+    ):
+        errors.append("default_quality must be an integer from 1 to 100")
+    return errors

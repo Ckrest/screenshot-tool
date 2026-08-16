@@ -1,131 +1,106 @@
 # Screenshot Tool
 
-A feature-rich screenshot utility for Wayland/Wayfire with interactive selection, window capture, and pixel-perfect positioning.
+Screenshot Tool is a persistent GTK4 service for Wayland/Wayfire. It captures a
+cursor-free raw frame through `wayland-capture`, presents that frozen frame in a
+layer-shell selector, and owns selection, encoding, naming, clipboard, sound,
+notifications, and post-save hooks.
 
-## Features
+## Architecture
 
-- **Interactive overlay**: Frozen screen with selection tools
-- **Window capture**: Click to capture individual windows (via `ext-image-copy-capture`)
-- **Region selection**: Drag to select custom areas with live dimensions
-- **Full screen**: Press the screenshot key again while the UI is open
-- **Magnifier**: 9x9 pixel grid with zoom for precise positioning
-- **Arrow keys**: Fine-tune cursor position (1px at a time)
-- **Multiple outputs**: Clipboard, notification, sound, JSON metadata
+`screenshot` is a thin D-Bus client. `screenshot-tool.service` owns
+`org.nick.ScreenshotTool`, reloads configuration for every request, and runs a
+small state machine:
 
-## Installation
-
-### System Dependencies
-
-These must be installed via your system package manager:
-
-```bash
-# Arch / Manjaro
-sudo pacman -S gtk3 gtk-layer-shell libnotify gobject-introspection cairo
-
-# Debian / Ubuntu
-sudo apt install gir1.2-gtk-3.0 gir1.2-gtklayershell-0.1 libnotify-dev libgirepository1.0-dev libcairo2-dev
+```text
+idle → freezing → selecting → saving → idle
 ```
 
-### Python Package
+The UI is created only while selecting. A second interactive request during
+freezing or selecting saves the already frozen frame fullscreen, so no lock
+file, command file, timer, or second capture is involved. Explicit window
+selection asks the same backend for a true window capture after the overlay has
+closed; it never silently crops the desktop frame.
+
+The backend boundary is the versioned `wayland-capture/frame@1` raw JSON
+contract. Screenshot Tool validates dimensions, stride, RGBA format, straight
+alpha, normal transform, cursor exclusion, and per-output layout before
+displaying or saving a frame. Each captured output gets its own layer-shell
+surface and viewport into a shared frozen frame, so logical Wayfire geometry is
+mapped correctly across scaled and transformed displays.
+
+Window selection joins Wayfire geometry to `wayland-capture` exclusively by
+the standard opaque foreign-toplevel identifier. App IDs remain a user-facing
+convenience selector; missing identifiers make a window uncapturable instead
+of falling back to a same-app or same-title window.
+
+## Install
+
+GTK4, gtk4-layer-shell, PyGObject, `wayland-capture`, `wl-copy`, and an optional
+`canberra-gtk-play` must be available. Then run:
 
 ```bash
-# Clone the repository
-git clone https://github.com/Ckrest/screenshot-tool.git
-cd screenshot-tool
-
-# Install (includes all Python dependencies)
-pip install .
-
-# Ensure wayland-capture is available (or set SCREENSHOT_TOOL_WAYLAND_CAPTURE)
+./install-user.sh
 ```
+
+The installer links the user unit, desktop entry, Wayfire action catalog, and
+Settings Hub catalog, enables the service, and starts it. Configuration remains
+under `~/.config/screenshot-tool/config.yaml`.
 
 ## Usage
 
 ```bash
-# Interactive mode (default)
-screenshot
-
-# Instant full screen capture
-screenshot --instant
-
-# Capture specific region
+screenshot                              # frozen interactive selector
+screenshot --instant                    # fullscreen, wait for result
 screenshot --region 100,100,800,600
-
-# Capture window by app-id
 screenshot --window kitty
-
-# Silent mode with JSON output (for scripting)
 screenshot --instant --silent --json
+screenshot --status
 ```
 
-### Hotkey Setup
+Interactive controls:
 
-This package declares its hotkey actions through Systems
-`trait_hotkey-actions.yaml`. On Wayfire, `wayfire-keybindings` discovers those
-actions and renders the compositor bindings.
+| Input | Result |
+| --- | --- |
+| Drag | Capture region |
+| Click | Capture window under pointer |
+| Space or PrintScreen | Capture frozen frame fullscreen |
+| Arrow keys | Move selection pointer by one image pixel |
+| Enter | Confirm the active region or window |
+| Escape or right-click | Cancel |
 
-Current defaults:
+## Output and notifications
 
-| Action | Binding |
-|--------|---------|
-| Screenshot | `PrintScreen` |
-| Interactive Screenshot | `Shift+PrintScreen` |
-| Silent Fullscreen Screenshot | leader sequence `s f` |
+Default filenames include capture context, such as
+`Screenshot_2026-08-15_14-32-08_Region.png`. Window filenames resolve the
+desktop application name where possible; titles are opt-in because they can
+expose private content. Files are encoded once and atomically moved into place.
+Clipboard MIME follows the selected file format.
 
-Press the screenshot hotkey again while the UI is open to capture fullscreen
-and close the UI cleanly.
-
-### Interactive Controls
-
-| Action | Effect |
-|--------|--------|
-| **Click** | Capture window under cursor |
-| **Drag** | Select custom region |
-| **Space/PrintScreen** | Full screen capture |
-| **Arrow keys** | Fine-tune cursor (1px) |
-| **Enter** | Confirm selection |
-| **ESC/Right-click** | Cancel |
+Every notification is sent as a distinct Freedesktop notification with
+`replaces_id=0`. Before publishing a new one, the service calls the standard
+`CloseNotification` method for the previous popup. Notification storage and
+history remain entirely the notification server's policy. Clicking the current
+notification invokes the standard `org.freedesktop.FileManager1.ShowItems`
+interface to reveal the file.
 
 ## Configuration
 
-Settings via environment variables or `~/.config/screenshot-tool/config.yaml`:
+Configuration priority is CLI request, `SCREENSHOT_TOOL_*` environment,
+configuration file, then defaults. The persistent service reloads it at request
+boundaries, so Settings Hub changes need no restart. See `config.example.yaml`.
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `SCREENSHOT_TOOL_WAYLAND_CAPTURE` | `wayland-capture` | Path to wayland-capture binary |
-| `SCREENSHOT_TOOL_DATA_DIR` | platform data dir | Base directory for persistent data |
-| `SCREENSHOT_TOOL_CACHE_DIR` | platform cache dir | Base directory for cache files |
-| `SCREENSHOT_TOOL_OUTPUT_DIR` | `~/Pictures/screenshots` | Default save location |
+Executable post-save hooks in `hooks_dir/on_save.d/` receive:
 
-## Dependencies
+```text
+path width height timestamp
+```
 
-### System
+## Test
 
-- **wayland-capture**: Screen/window capture binary (ext-image-copy-capture protocol)
-- **wl-copy**: Clipboard integration
-- **gtk-layer-shell**: Wayland overlay support
-- **libnotify**: Desktop notifications
-
-### Python (installed via pip)
-
-- **PyGObject**: GTK3 bindings
-- **pycairo**: Cairo bindings
-- **PyYAML**: Configuration loading
-- **platformdirs**: XDG directory resolution
-
-### Optional
-
-- **wayfire** (pip): Window geometry support for Wayfire compositor
-
-## Output
-
-Screenshots are saved to `~/Pictures/screenshots/` with timestamp filenames.
-
-JSON output mode (`--json`) returns:
-```json
-{"path": "/path/to/screenshot.png", "width": 1920, "height": 1080, "timestamp": "2025-01-21T12:00:00"}
+```bash
+PYTHONPATH=src pytest -q
 ```
 
 ## License
 
-MIT License - see [LICENSE](LICENSE)
+MIT License. See `LICENSE`.

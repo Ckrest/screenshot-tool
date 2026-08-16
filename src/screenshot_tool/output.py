@@ -1,227 +1,173 @@
-"""Post-capture output handling.
+"""Single-encode, atomic screenshot output pipeline."""
 
-Handles:
-- Saving to disk (with format conversion)
-- Copying to clipboard
-- Desktop notifications
-- Sound feedback
-- JSON output for scripting
-"""
+from __future__ import annotations
 
-import json
 import logging
+import os
+import re
 import subprocess
-from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
 
 import gi
-gi.require_version("GdkPixbuf", "2.0")
-from gi.repository import GdkPixbuf
 
-from .config import Config, get_config
-from .hooks import notify_save
+gi.require_version("GdkPixbuf", "2.0")
+from gi.repository import GdkPixbuf, Gio, GLib
+
+from .config import Config
+from .models import CaptureRequest, OutputOptions, OutputResult, RawFrame
 
 log = logging.getLogger(__name__)
 
-
-@dataclass
-class OutputOptions:
-    """Options for output handling."""
-
-    output_path: Optional[Path] = None  # Custom output path
-    output_format: str = "png"  # png, jpg, webp
-    quality: int = 90  # Quality for lossy formats
-
-    clipboard: bool = True
-    notification: bool = True
-    sound: bool = True
-
-    # Output modes (mutually exclusive)
-    stdout: bool = False  # Print path to stdout
-    json_output: bool = False  # Output JSON metadata
-
-    # Silent mode - for scripting
-    silent: bool = False  # Disables clipboard/notification/sound, uses tmp dir
-
-    def __post_init__(self):
-        if self.silent:
-            self.clipboard = False
-            self.notification = False
-            self.sound = False
+MIME_TYPES = {
+    "png": "image/png",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "webp": "image/webp",
+}
 
 
-@dataclass
-class OutputResult:
-    """Result of saving a screenshot."""
-
-    path: Path
-    width: int
-    height: int
-    timestamp: str
-
-    def to_dict(self) -> dict:
-        return {
-            "path": str(self.path),
-            "width": self.width,
-            "height": self.height,
-            "timestamp": self.timestamp,
-        }
-
-    def to_json(self) -> str:
-        return json.dumps(self.to_dict())
-
-
-def _copy_to_clipboard(path: Path):
-    """Copy image to clipboard using wl-copy."""
-    try:
-        with open(path, "rb") as f:
-            subprocess.run(["wl-copy", "-t", "image/png"], stdin=f, check=True)
-        log.debug("Copied to clipboard")
-    except Exception as e:
-        log.warning("Failed to copy to clipboard: %s", e)
-
-
-def _play_sound():
-    """Play camera shutter sound."""
-    try:
-        subprocess.Popen(
-            ["canberra-gtk-play", "-i", "screen-capture"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except Exception as e:
-        log.debug("Could not play sound: %s", e)
-
-
-def _show_notification(path: Path, width: int, height: int):
-    """Show desktop notification."""
-    try:
-        gi.require_version("Notify", "0.7")
-        from gi.repository import Notify
-        Notify.init("Screenshot Tool")
-        notification = Notify.Notification.new(
-            "Screenshot Captured",
-            f"Saved to {path.name}\n{width}x{height} pixels",
-            "camera-photo",
-        )
-        notification.set_urgency(Notify.Urgency.LOW)
-        notification.show()
-    except Exception as e:
-        log.debug("Could not show notification: %s", e)
-
-
-def save(
-    source_path: Path,
-    options: Optional[OutputOptions] = None,
-    config: Optional[Config] = None,
-) -> OutputResult:
-    """Save screenshot with all post-processing.
-
-    Args:
-        source_path: Path to the captured image (will be deleted after processing)
-        options: Output options
-        config: Configuration object
-
-    Returns:
-        OutputResult with final path and metadata
-    """
-    options = options or OutputOptions()
-    config = config or get_config()
-
-    # Load image
-    img = GdkPixbuf.Pixbuf.new_from_file(str(source_path))
-    width = img.get_width()
-    height = img.get_height()
-
-    # Determine output path
-    if options.output_path:
-        output_path = options.output_path
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-    elif options.silent:
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        output_path = config.silent_output_dir / f"screenshot_{timestamp}.{options.output_format}"
-    else:
-        config.output_dir.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-        output_path = config.output_dir / f"screenshot_{timestamp}.{options.output_format}"
-
-    # Save in requested format
-    output_format = options.output_format.lower()
-    if output_format == "png":
-        img.savev(str(output_path), "png", [], [])
-    elif output_format in ("jpg", "jpeg"):
-        img.savev(str(output_path), "jpeg", ["quality"], [str(options.quality)])
-    elif output_format == "webp":
-        try:
-            img.savev(str(output_path), "webp", ["quality"], [str(options.quality)])
-        except Exception:
-            # Fallback to PNG if webp not supported
-            output_path = output_path.with_suffix(".png")
-            img.savev(str(output_path), "png", [], [])
-    else:
-        # Default to PNG for unknown formats
-        img.savev(str(output_path), "png", [], [])
-
-    # Post-processing
-    if options.clipboard:
-        _copy_to_clipboard(output_path)
-
-    if options.sound:
-        _play_sound()
-
-    if options.notification:
-        _show_notification(output_path, width, height)
-
-    # Create result
-    result = OutputResult(
-        path=output_path,
-        width=width,
-        height=height,
-        timestamp=datetime.now().isoformat(),
+def options_for_request(request: CaptureRequest, config: Config) -> OutputOptions:
+    silent = request.silent
+    path_format = (
+        request.output_path.suffix.lstrip(".").lower() if request.output_path else ""
+    )
+    selected_format = (
+        request.output_format
+        or (path_format if path_format in MIME_TYPES else None)
+        or config.default_format
+    )
+    return OutputOptions(
+        output_path=request.output_path,
+        output_format=selected_format.lower(),
+        quality=request.quality
+        if request.quality is not None
+        else config.default_quality,
+        clipboard=False
+        if silent
+        else (
+            config.enable_clipboard if request.clipboard is None else request.clipboard
+        ),
+        notification=False
+        if silent
+        else (
+            config.enable_notification
+            if request.notification is None
+            else request.notification
+        ),
+        sound=False
+        if silent
+        else (config.enable_sound if request.sound is None else request.sound),
+        silent=silent,
     )
 
-    # Notify hooks (runs asynchronously, won't block)
-    notify_save(result, config)
 
-    # Output modes
-    if options.json_output:
-        print(result.to_json(), flush=True)
-    elif options.stdout:
-        print(str(output_path), flush=True)
-    else:
-        log.info("Screenshot saved: %s", output_path)
-
-    return result
+def _safe_component(value: str) -> str:
+    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "-", value.strip()).strip("-._")
+    return cleaned[:80] or "Window"
 
 
-def save_pixbuf(
-    pixbuf: GdkPixbuf.Pixbuf,
-    options: Optional[OutputOptions] = None,
-    config: Optional[Config] = None,
+def app_display_name(app_id: str) -> str:
+    """Resolve an app-id through desktop entries, with a stable raw-id fallback."""
+    target = app_id.lower()
+    for info in Gio.AppInfo.get_all():
+        desktop_id = (info.get_id() or "").removesuffix(".desktop").lower()
+        if target in {desktop_id, desktop_id.split(".")[-1]}:
+            return _safe_component(info.get_display_name() or app_id)
+    return _safe_component(app_id)
+
+
+def _context_name(
+    source: str, app_id: str | None, title: str | None, include_title: bool
+) -> str:
+    if source == "fullscreen":
+        return "Fullscreen"
+    if source == "region":
+        return "Region"
+    name = app_display_name(app_id or "Window")
+    if include_title and title:
+        name = f"{name}_{_safe_component(title)}"
+    return name
+
+
+def output_path(
+    options: OutputOptions,
+    config: Config,
+    source: str,
+    app_id: str | None = None,
+    title: str | None = None,
+    now: datetime | None = None,
+) -> Path:
+    if options.output_path:
+        return options.output_path.expanduser()
+    directory = config.silent_output_dir if options.silent else config.output_dir
+    extension = "jpg" if options.output_format == "jpeg" else options.output_format
+    current = now or datetime.now().astimezone()
+    timestamp = current.strftime("%Y-%m-%d_%H-%M-%S")
+    context = _context_name(source, app_id, title, config.include_window_title)
+    base = directory / f"Screenshot_{timestamp}_{context}.{extension}"
+    if not base.exists():
+        return base
+    for index in range(2, 1000):
+        candidate = base.with_name(f"{base.stem}_{index}{base.suffix}")
+        if not candidate.exists():
+            return candidate
+    return base.with_name(f"{base.stem}_{current.strftime('%f')}{base.suffix}")
+
+
+def save_frame(
+    frame: RawFrame,
+    options: OutputOptions,
+    config: Config,
+    source: str,
+    app_id: str | None = None,
+    title: str | None = None,
 ) -> OutputResult:
-    """Save a GdkPixbuf directly (for UI cropped regions).
+    if options.output_format not in MIME_TYPES:
+        raise ValueError(f"Unsupported output format: {options.output_format}")
+    if not 1 <= options.quality <= 100:
+        raise ValueError("Quality must be between 1 and 100")
+    destination = output_path(options, config, source, app_id, title)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    pixbuf = GdkPixbuf.Pixbuf.new_from_bytes(
+        GLib.Bytes.new(frame.pixels),
+        GdkPixbuf.Colorspace.RGB,
+        True,
+        8,
+        frame.width,
+        frame.height,
+        frame.stride,
+    )
+    encoder = (
+        "jpeg" if options.output_format in {"jpg", "jpeg"} else options.output_format
+    )
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.part")
+    keys, values = (
+        (["quality"], [str(options.quality)])
+        if encoder in {"jpeg", "webp"}
+        else ([], [])
+    )
+    try:
+        pixbuf.savev(str(temporary), encoder, keys, values)
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    timestamp = datetime.now().astimezone().isoformat()
+    return OutputResult(destination, frame.width, frame.height, timestamp, source)
 
-    Args:
-        pixbuf: The image to save
-        options: Output options
-        config: Configuration object
 
-    Returns:
-        OutputResult with final path and metadata
-    """
-    import tempfile
-
-    # Save to temp file first
-    with tempfile.NamedTemporaryFile(suffix=".png", delete=False) as tmp:
-        temp_path = Path(tmp.name)
-    pixbuf.savev(str(temp_path), "png", [], [])
-
-    # Use main save function
-    result = save(temp_path, options, config)
-
-    # Clean up temp file
-    temp_path.unlink(missing_ok=True)
-
-    return result
+def copy_to_clipboard(path: Path, output_format: str) -> None:
+    mime = MIME_TYPES[output_format]
+    try:
+        with path.open("rb") as stream:
+            subprocess.run(
+                ["wl-copy", "--type", mime],
+                stdin=stream,
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=10,
+            )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log.warning("Could not copy screenshot to clipboard: %s", exc)

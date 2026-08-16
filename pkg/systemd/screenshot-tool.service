@@ -1,0 +1,18 @@
+[Unit]
+Description=Persistent Screenshot Tool service
+Documentation=https://github.com/Ckrest/screenshot-tool
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=org.nick.ScreenshotTool
+# gtk4-layer-shell must be interposed before GTK loads libwayland-client.
+Environment=LD_PRELOAD=libgtk4-layer-shell.so
+ExecStart=%h/.local/bin/screenshot-tool-service
+Restart=on-failure
+RestartSec=1
+Slice=session-graphical.slice
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,52 @@
+- schema_version: 5
+  package: screenshot-tool
+  id: screenshot-tool
+  tab_id: appearance
+  title: Screenshots
+  description: Screenshot capture, naming, and output behavior. Changes apply to the next capture.
+  order: 30
+  config:
+    file: ~/.config/screenshot-tool/config.yaml
+    format: yaml
+  tiles:
+  - id: screenshot-default-format
+    type: select
+    title: File Format
+    description: Format used when a command does not explicitly choose one.
+    props:
+      section_id: $root
+      key: default_format
+      options:
+      - value: png
+        label: PNG
+      - value: jpg
+        label: JPEG
+      - value: webp
+        label: WebP
+  - id: screenshot-copy-to-clipboard
+    type: toggle
+    title: Copy New Screenshots to Clipboard
+    description: Immediately make each new screenshot available to paste into other apps.
+    props:
+      section_id: $root
+      key: enable_clipboard
+  - id: screenshot-notifications
+    type: toggle
+    title: Show Capture Notification
+    description: Show only the latest screenshot popup while retaining distinct notification records.
+    props:
+      section_id: $root
+      key: enable_notification
+  - id: screenshot-sound
+    type: toggle
+    title: Play Shutter Sound
+    props:
+      section_id: $root
+      key: enable_sound
+  - id: screenshot-window-title
+    type: toggle
+    title: Include Window Title in Filename
+    description: Window titles may contain document names or browsing content.
+    props:
+      section_id: $root
+      key: include_window_title

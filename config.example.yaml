@@ -1,21 +1,15 @@
-# Screenshot Tool configuration
-#
-# Override with environment variables: SCREENSHOT_TOOL_*
-# Example: SCREENSHOT_TOOL_OUTPUT_DIR=~/Desktop/shots
-#
+# Screenshot Tool configuration. The persistent service reloads this for every request.
+wayland_capture: wayland-capture
+output_dir: ~/Pictures/screenshots
 default_format: png
 default_quality: 90
 enable_clipboard: true
 enable_notification: true
 enable_sound: true
-lock_file: /tmp/screenshot-tool.lock
-output_dir: ~/Pictures/screenshots
-silent_output_dir: /tmp
-wayland_capture: wayland-capture
+include_window_title: false
 
-# Storage (auto-detected for your platform, uncomment to override)
-# data_dir:
-# cache_dir:
+# Runtime captures used by --silent default below $XDG_RUNTIME_DIR.
+# silent_output_dir:
 
-# Hook scripts directory (auto-detected, uncomment to override)
+# Executable post-save hooks live in hooks_dir/on_save.d/.
 # hooks_dir:
